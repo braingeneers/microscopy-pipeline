@@ -1,57 +1,75 @@
 #!/bin/bash
 
 # Check if correct number of arguments provided
-if [[ $# -ne 5 ]]; then
-    echo "Usage: $0 <photo_directory> <destination_directory> <minimum> <maximum> <increment>"
-    echo "Example: $0 /path/to/photos /path/to/subset 0 100 10"
-    echo "Example: $0 \"d:\\Documents\\photos\" \"d:\\Documents\\subset\" 5 50 5"
+# Defaults
+TIMEPOINTINCREMENT=1
+MINTIMEPOINT=""
+MAXTIMEPOINT=""
+ 
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --input)               PHOTO_DIR="$2";           shift 2 ;;
+        --output)              DEST_DIR="$2";             shift 2 ;;
+        --minzstack)           minimum="$2";              shift 2 ;;
+        --maxzstack)           maximum="$2";              shift 2 ;;
+        --zstackincrement)     increment="$2";            shift 2 ;;
+        --mintimepoint)        MINTIMEPOINT="$2";         shift 2 ;;
+        --maxtimepoint)        MAXTIMEPOINT="$2";         shift 2 ;;
+        --timepointincrement)  TIMEPOINTINCREMENT="$2";   shift 2 ;;
+        *)
+            echo "Unknown argument: $1"
+            echo "Usage: $0 --input DIR --output DIR --minzstack N --maxzstack N --zstackincrement N [--mintimepoint N] [--maxtimepoint N] [--timepointincrement N]"
+            exit 1 ;;
+    esac
+done
+ 
+# Check required arguments
+if [[ -z "$PHOTO_DIR" || -z "$DEST_DIR" || -z "$minimum" || -z "$maximum" || -z "$increment" ]]; then
+    echo "Usage: $0 --input DIR --output DIR --minzstack N --maxzstack N --zstackincrement N [--mintimepoint N] [--maxtimepoint N] [--timepointincrement N]"
     exit 1
 fi
-
-# Set directories and parameters from command line arguments
-PHOTO_DIR="$1"
-DEST_DIR="$2"
-minimum=$3
-maximum=$4
-increment=$5
-
+ 
 # Check if the photo directory exists
 if [[ ! -d "$PHOTO_DIR" ]]; then
     echo "Error: Photo directory '$PHOTO_DIR' does not exist"
     exit 1
 fi
-
+ 
 echo "Processing photos in: $PHOTO_DIR"
 echo "Destination directory: $DEST_DIR"
-echo "Range: $minimum to $maximum with increment $increment"
-
-# Iterate through all files in the directory and rename '+-' to '-'
-# echo "Renaming files with '+- ' to '-'..."
-# for file in "$PHOTO_DIR"/*; do
-#     if [[ "$(basename "$file")" == *"+-"* ]]; then
-#         newfile="${file//+\-/-}"
-#         mv "$file" "$newfile"
-#         echo "  Renamed: $(basename "$file") -> $(basename "$newfile")"
-#     fi
-# done
-
+echo "Z-stack range: $minimum to $maximum with increment $increment"
+if [[ -n "$MINTIMEPOINT" || -n "$MAXTIMEPOINT" ]]; then
+    echo "Timepoint range: ${MINTIMEPOINT:-any} to ${MAXTIMEPOINT:-any} with increment $TIMEPOINTINCREMENT"
+fi
+ 
 # Create the destination folder if it doesn't exist
 mkdir -p "$DEST_DIR"
 echo "Created destination directory: $DEST_DIR"
-
+ 
 echo "Copying subset of photos..."
 copied_count=0
-
+ 
 for ((i=minimum; i<=maximum; i+=increment)); do
-    echo "Processing files with index: $i"
+    echo "Processing files with z-stack index: $i"
     for file in "$PHOTO_DIR"/*; do
         filename=$(basename "$file")
-        if [[ "$filename" =~ .*_zs\+${i}\.png$ ]]; then
+        if [[ "$filename" =~ ^([0-9]+)_zs\+${i}\.png$ ]]; then
+            tp=$((10#${BASH_REMATCH[1]}))
+ 
+            # Check timepoint bounds if specified
+            if [[ -n "$MINTIMEPOINT" && $tp -lt $MINTIMEPOINT ]]; then continue; fi
+            if [[ -n "$MAXTIMEPOINT" && $tp -gt $MAXTIMEPOINT ]]; then continue; fi
+ 
+            # Check timepoint increment if a min was given
+            if [[ -n "$MINTIMEPOINT" ]]; then
+                if (( (tp - MINTIMEPOINT) % TIMEPOINTINCREMENT != 0 )); then continue; fi
+            fi
+ 
             cp "$file" "$DEST_DIR/"
             echo "  Copied: $filename"
             ((copied_count++))
         fi
     done
 done
-
+ 
 echo "Completed! Copied $copied_count files to $DEST_DIR"

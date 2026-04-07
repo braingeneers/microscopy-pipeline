@@ -1,322 +1,269 @@
 import argparse
 import numpy as np
 import os
+import sys
 from PIL import Image
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 import multiprocessing
+from pipeline_log import get_logger
 
-def scale_brightness_optimized(img_array, top, bottom):
-    """Optimized version using pure NumPy operations"""
-    # Convert to float32 (faster than float64 for this use case)
+log = get_logger("scalecolors")
+
+
+# ---------------------------------------------------------------------------
+# Core image processing
+# ---------------------------------------------------------------------------
+
+def scale_brightness(img_array, top, bottom):
+    """
+    Linearly remap pixel values from [bottom, top] to [0, 65535].
+    Input may be uint8 (0-255) or uint16 (0-65535).
+    Output is always uint16.
+    Values outside [bottom, top] are clipped.
+    """
     img_float = img_array.astype(np.float32)
-    
-    # Vectorized scaling - no conditional checks needed
-    # This handles the case where max > 255 automatically
-    if img_float.max() > 255:
-        img_float *= (255.0 / img_float.max())
-    
-    # Single vectorized operation for the entire scaling
-    # np.clip is highly optimized and handles the boundary conditions
-    scaled = np.clip((img_float - bottom) * (65535.0 / (top - bottom)), 0, 65535)
-    
-    # Direct conversion to uint16
+
+    # Normalize uint16 input to 0-255 range so that top/bottom
+    # can always be specified in 8-bit terms by the caller.
+    if img_array.dtype == np.uint16:
+        img_float *= 255.0 / 65535.0
+
+    scaled = np.clip(
+        (img_float - bottom) * (65535.0 / (top - bottom)),
+        0, 65535
+    )
     return scaled.astype(np.uint16)
 
-def process_single_image_optimized(input_path, output_path, top, bottom):
-    """Optimized single image processing"""
+
+def load_grayscale(path):
+    """Open an image and return it as a grayscale NumPy array."""
+    with Image.open(path) as img:
+        if img.mode not in ("L", "I;16"):
+            img = img.convert("L")
+        return np.asarray(img)
+
+
+def save_tiff(array, path):
+    """Save a uint16 array as a LZW-compressed TIFF."""
+    out_img = Image.fromarray(array, mode="I;16")
+    out_img.save(path, compression="tiff_lzw")
+
+
+# ---------------------------------------------------------------------------
+# Single-file processing
+# ---------------------------------------------------------------------------
+
+def process_single(input_path, output_path, top, bottom):
+    """
+    Scale a single image and write it to output_path.
+    Returns True on success, False on failure.
+    """
+    log.info("Processing single file: %s", input_path)
     try:
-        # Use PIL's faster loading with specific mode
-        with Image.open(input_path) as img:
-            # Convert to grayscale if needed, but avoid unnecessary conversions
-            if img.mode != 'L':
-                img = img.convert('L')
-            
-            # Direct numpy array conversion
-            img_array = np.asarray(img, dtype=np.uint8)
-        
-        print(f"  Input range: {img_array.min()}-{img_array.max()}")
+        img_array = load_grayscale(input_path)
+        log.info("  Input  | shape=%s dtype=%s range=%d-%d",
+                 img_array.shape, img_array.dtype,
+                 img_array.min(), img_array.max())
 
-        # Use optimized scaling function
-        scaled_array = scale_brightness_optimized(img_array, top, bottom)
-        
-        print(f"  Output range: {scaled_array.min()}-{scaled_array.max()}")
+        scaled = scale_brightness(img_array, top, bottom)
+        log.info("  Output | range=%d-%d", scaled.min(), scaled.max())
 
-        # Use PIL's optimized save with specific parameters
-        out_img = Image.fromarray(scaled_array, mode="I;16")
-        out_img.save(output_path, optimize=True)
-        
+        output_dir = os.path.dirname(output_path)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+
+        save_tiff(scaled, output_path)
+        log.info("  Saved  | path=%s", output_path)
         return True
+
     except Exception as e:
-        print(f"  Error: {e}")
+        log.error("  FAILED | path=%s error=%s", input_path, e)
         return False
 
-def process_image_worker(args):
-    """Worker function for parallel processing"""
-    input_file_path, output_file_path, top, bottom, file_index, total_files, image_file = args
-    
-    print(f"[{file_index}/{total_files}] Processing: {image_file}")
-    
-    try:
-        with Image.open(input_file_path) as img:
-            if img.mode != 'L':
-                img = img.convert('L')
-            img_array = np.asarray(img, dtype=np.uint8)
-        
-        print(f"  Shape: {img_array.shape}, Input range: {img_array.min()}-{img_array.max()}")
-        
-        # Use optimized scaling
-        scaled_array = scale_brightness_optimized(img_array, top, bottom)
-        
-        # Save result
-        out_img = Image.fromarray(scaled_array, mode="I;16")
-        out_img.save(output_file_path, optimize=True)
-        
-        base_name = os.path.splitext(image_file)[0]
-        output_filename = f"{base_name}.png"
-        print(f"  Success: {output_filename}, Output range: {scaled_array.min()}-{scaled_array.max()}")
-        
-        return True, image_file
-        
-    except Exception as e:
-        print(f"  Failed: {image_file} - {e}")
-        return False, image_file
 
-def process_folder_parallel(input_folder, output_folder, top, bottom, max_workers=None):
-    """Process all images in a folder using parallel processing"""
-    # Create output directory if it doesn't exist
+# ---------------------------------------------------------------------------
+# Batch worker (called by thread pool)
+# ---------------------------------------------------------------------------
+
+def _worker(args):
+    """Worker function unpacked by ThreadPoolExecutor.map()."""
+    input_path, output_path, top, bottom, index, total = args
+    filename = os.path.basename(input_path)
+    log.info("[%d/%d] START | file=%s", index, total, filename)
+
+    try:
+        img_array = load_grayscale(input_path)
+        scaled = scale_brightness(img_array, top, bottom)
+        save_tiff(scaled, output_path)
+        log.info("[%d/%d] OK    | file=%s range=%d-%d",
+                 index, total, filename, scaled.min(), scaled.max())
+        return True, filename
+
+    except Exception as e:
+        log.error("[%d/%d] FAIL  | file=%s error=%s", index, total, filename, e)
+        return False, filename
+
+
+# ---------------------------------------------------------------------------
+# Batch folder processing
+# ---------------------------------------------------------------------------
+
+SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tiff", ".tif", ".bmp"}
+
+
+def process_folder(input_folder, output_folder, top, bottom,
+                   max_workers=None, parallel=True):
+    """
+    Scale all images in input_folder and write results to output_folder.
+    Parallel by default; pass parallel=False for sequential execution.
+    """
+    if not os.path.isdir(input_folder):
+        log.error("Input folder not found: %s", input_folder)
+        sys.exit(1)
+
     os.makedirs(output_folder, exist_ok=True)
-    
-    # Supported image extensions
-    image_extensions = {'.png', '.jpg', '.jpeg', '.tiff', '.tif', '.bmp', '.gif'}
-    
-    # Find all image files
-    image_files = [f for f in os.listdir(input_folder) 
-                   if os.path.isfile(os.path.join(input_folder, f)) and 
-                   os.path.splitext(f.lower())[1] in image_extensions]
-    
+
+    image_files = sorted(
+        f for f in os.listdir(input_folder)
+        if os.path.isfile(os.path.join(input_folder, f))
+        and os.path.splitext(f.lower())[1] in SUPPORTED_EXTENSIONS
+    )
+
     if not image_files:
-        print(f"No image files found in {input_folder}")
+        log.warning("No supported image files found in: %s", input_folder)
         return
-    
-    # Determine optimal number of workers
-    if max_workers is None:
-        max_workers = min(len(image_files), multiprocessing.cpu_count())
-    
-    print(f"Found {len(image_files)} image files to process")
-    print(f"Input folder: {os.path.abspath(input_folder)}")
-    print(f"Output folder: {os.path.abspath(output_folder)}")
-    print(f"Brightness mapping: {bottom}-{top} (8-bit) → 0-65535 (16-bit)")
-    print(f"Using {max_workers} parallel workers")
-    print("-" * 60)
-    
-    # Prepare arguments for parallel processing
-    process_args = []
-    for i, image_file in enumerate(sorted(image_files), 1):
-        input_file_path = os.path.join(input_folder, image_file)
-        base_name = os.path.splitext(image_file)[0]
-        output_filename = f"{base_name}.png"
-        output_file_path = os.path.join(output_folder, output_filename)
-        
-        process_args.append((input_file_path, output_file_path, top, bottom, i, len(image_files), image_file))
-    
-    # Process images in parallel
+
+    total = len(image_files)
+    workers = max_workers or min(total, multiprocessing.cpu_count())
+
+    log.info("BATCH START | files=%d input=%s output=%s top=%d bottom=%d workers=%s",
+             total,
+             os.path.abspath(input_folder),
+             os.path.abspath(output_folder),
+             top, bottom,
+             workers if parallel else "sequential")
+
+    # Build argument list for workers
+    work_items = []
+    for i, fname in enumerate(image_files, 1):
+        base = os.path.splitext(fname)[0]
+        work_items.append((
+            os.path.join(input_folder, fname),
+            os.path.join(output_folder, f"{base}.tif"),
+            top, bottom, i, total
+        ))
+
     successful = 0
     failed = 0
-    
-    # Use ThreadPoolExecutor for I/O bound operations (image loading/saving)
-    # Use ProcessPoolExecutor for CPU-bound operations if images are very large
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        results = executor.map(process_image_worker, process_args)
-        
-        for success, filename in results:
+
+    if parallel:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            for success, _ in executor.map(_worker, work_items):
+                if success:
+                    successful += 1
+                else:
+                    failed += 1
+    else:
+        for item in work_items:
+            success, _ = _worker(item)
             if success:
                 successful += 1
             else:
                 failed += 1
-    
-    print("\n" + "=" * 60)
-    print(f"Batch processing complete:")
-    print(f"  Successfully processed: {successful}")
-    print(f"  Failed: {failed}")
-    print(f"  Output folder: {os.path.abspath(output_folder)}")
 
-def process_folder_sequential(input_folder, output_folder, top, bottom):
-    """Original sequential processing (kept for compatibility)"""
-    # Create output directory if it doesn't exist
-    os.makedirs(output_folder, exist_ok=True)
-    
-    # Supported image extensions
-    image_extensions = {'.png', '.jpg', '.jpeg', '.tiff', '.tif', '.bmp', '.gif'}
-    
-    # Find all image files
-    image_files = [f for f in os.listdir(input_folder) 
-                   if os.path.isfile(os.path.join(input_folder, f)) and 
-                   os.path.splitext(f.lower())[1] in image_extensions]
-    
-    if not image_files:
-        print(f"No image files found in {input_folder}")
-        return
-    
-    print(f"Found {len(image_files)} image files to process")
-    print(f"Input folder: {os.path.abspath(input_folder)}")
-    print(f"Output folder: {os.path.abspath(output_folder)}")
-    print(f"Brightness mapping: {bottom}-{top} (8-bit) → 0-65535 (16-bit)")
-    print("-" * 60)
-    
-    successful = 0
-    failed = 0
-    
-    for i, image_file in enumerate(sorted(image_files), 1):
-        input_file_path = os.path.join(input_folder, image_file)
-        
-        # Create output filename (preserve name, ensure .png extension for 16-bit)
-        base_name = os.path.splitext(image_file)[0]
-        output_filename = f"{base_name}.png"
-        output_file_path = os.path.join(output_folder, output_filename)
-        
-        print(f"[{i}/{len(image_files)}] Processing: {image_file}")
-        
-        if process_single_image_optimized(input_file_path, output_file_path, top, bottom):
-            print(f"  Success: {output_filename}")
-            successful += 1
-        else:
-            print(f"  Failed: {image_file}")
-            failed += 1
-        
-        print()  # Add blank line between files
-    
-    print("=" * 60)
-    print(f"Batch processing complete:")
-    print(f"  Successfully processed: {successful}")
-    print(f"  Failed: {failed}")
-    print(f"  Output folder: {os.path.abspath(output_folder)}")
+    # Machine-parseable terminal status line
+    status = "complete" if failed == 0 else "complete_with_errors"
+    log.info("BATCH END | status=%s success=%d failed=%d output=%s",
+             status, successful, failed, os.path.abspath(output_folder))
+
+    if failed > 0:
+        log.warning("STATUS: %s | %d file(s) failed — check errors above", status, failed)
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Scale greyscale image brightness to 16-bit space.",
+        description="Scale grayscale image brightness to 16-bit TIFF.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-EXAMPLES:
-  # Single image processing
-  python scalecolors.py input.png output.png --top 200 --bottom 50
-  
-  # Process all images in a folder (parallel processing)
-  python scalecolors.py --input-folder ./images --output-folder ./scaled --top 200 --bottom 50
-  
-  # Use specific number of parallel workers
-  python scalecolors.py --input-folder ./images --output-folder ./scaled --top 200 --bottom 50 --workers 8
-  
-  # Disable parallel processing (sequential mode)
-  python scalecolors.py --input-folder ./images --output-folder ./scaled --top 200 --bottom 50 --no-parallel
-  
-  # Increase contrast for dark images - map 0-150 to full range
-  python scalecolors.py dark_image.jpg bright_output.png --top 150 --bottom 0
+EXAMPLES
+  Single file:
+    python scalecolors.py --input image.png --output scaled.tif --top 200 --bottom 50
 
-PERFORMANCE OPTIMIZATIONS:
-  - Vectorized NumPy operations for 10-50x speedup
-  - Parallel processing for batch operations
-  - Optimized PIL image loading/saving
-  - Memory-efficient processing
-  - Automatic worker count based on CPU cores
+  Batch folder (parallel, default):
+    python scalecolors.py --input-folder ./raw --output-folder ./scaled --top 200 --bottom 50
 
-BATCH PROCESSING:
-  - Processes all image files in input folder (.png, .jpg, .jpeg, .tiff, .tif, .bmp, .gif)
-  - Output files named as: {original_name}.png
-  - Creates output folder if it doesn't exist
-  - All outputs are 16-bit PNG files for maximum dynamic range
-  - Uses parallel processing by default for faster batch operations
+  Batch folder (sequential):
+    python scalecolors.py --input-folder ./raw --output-folder ./scaled --top 200 --bottom 50 --no-parallel
 
-SCALING BEHAVIOR:
-  - Input pixels with value <= bottom are mapped to 0 (black)
-  - Input pixels with value >= top are mapped to 65535 (white)
-  - Input pixels between bottom and top are linearly scaled to 0-65535
-  - Formula: output = ((input - bottom) / (top - bottom)) * 65535
+  Limit parallel workers:
+    python scalecolors.py --input-folder ./raw --output-folder ./scaled --top 200 --bottom 50 --workers 4
+
+SCALING BEHAVIOUR
+  Pixels <= bottom  →  0
+  Pixels >= top     →  65535
+  Pixels in between →  linearly interpolated
+  Formula: output = ((input - bottom) / (top - bottom)) * 65535
         """
     )
-    
-    # Make input and folder mutually exclusive
+
+    # Input — mutually exclusive: single file vs folder
     input_group = parser.add_mutually_exclusive_group(required=True)
-    input_group.add_argument("input", nargs='?', help="Input greyscale image file (for single file mode)")
-    input_group.add_argument("--input-folder", help="Path to folder containing images (for batch mode)")
-    
-    # Output arguments
+    input_group.add_argument("--input", metavar="FILE",
+                             help="Single input image file")
+    input_group.add_argument("--input-folder", metavar="DIR",
+                             help="Folder of images to process in batch")
+
+    # Output — mutually exclusive: single file vs folder
     output_group = parser.add_mutually_exclusive_group()
-    output_group.add_argument("output", nargs='?', help="Output image file (for single file mode)")
-    output_group.add_argument("--output-folder", help="Path to folder for scaled images (for batch mode)")
-    
-    # Threshold arguments
-    parser.add_argument("--top", type=int, required=True, 
-                       help="Top brightness threshold (8-bit, 0-255) - values >= this become white")
-    parser.add_argument("--bottom", type=int, required=True, 
-                       help="Bottom brightness threshold (8-bit, 0-255) - values <= this become black")
-    
-    # Performance arguments
+    output_group.add_argument("--output", metavar="FILE",
+                              help="Output file path (single-file mode)")
+    output_group.add_argument("--output-folder", metavar="DIR",
+                              help="Output folder (batch mode)")
+
+    # Brightness thresholds
+    parser.add_argument("--top", type=int, required=True,
+                        help="Upper brightness threshold (8-bit 0-255); pixels at or above become white")
+    parser.add_argument("--bottom", type=int, required=True,
+                        help="Lower brightness threshold (8-bit 0-255); pixels at or below become black")
+
+    # Parallelism
     parser.add_argument("--workers", type=int, default=None,
-                       help="Number of parallel workers for batch processing (default: auto-detect)")
-    parser.add_argument("--no-parallel", action='store_true',
-                       help="Disable parallel processing (use sequential mode)")
-    
+                        help="Number of parallel workers (default: number of CPU cores)")
+    parser.add_argument("--no-parallel", action="store_true",
+                        help="Disable parallel processing and run sequentially")
+
     args = parser.parse_args()
-    
-    # Validate threshold values
+
+    # Validate thresholds
     if not (0 <= args.bottom <= 255):
-        parser.error("Bottom threshold must be between 0 and 255")
+        parser.error("--bottom must be between 0 and 255")
     if not (0 <= args.top <= 255):
-        parser.error("Top threshold must be between 0 and 255")
+        parser.error("--top must be between 0 and 255")
     if args.bottom >= args.top:
-        parser.error("Bottom threshold must be less than top threshold")
+        parser.error("--bottom must be less than --top")
 
-    # Validate arguments and process
+    # Dispatch
     if args.input_folder:
-        # Batch mode
         if not args.output_folder:
-            parser.error("--output-folder is required when using --input-folder")
-        
-        if not os.path.isdir(args.input_folder):
-            parser.error(f"Input folder '{args.input_folder}' does not exist")
-        
-        # Choose processing method
-        if args.no_parallel:
-            process_folder_sequential(args.input_folder, args.output_folder, args.top, args.bottom)
-        else:
-            process_folder_parallel(args.input_folder, args.output_folder, args.top, args.bottom, args.workers)
-    
+            parser.error("--output-folder is required with --input-folder")
+        process_folder(
+            args.input_folder, args.output_folder,
+            args.top, args.bottom,
+            max_workers=args.workers,
+            parallel=not args.no_parallel
+        )
+
     else:
-        # Single file mode
         if not args.output:
-            parser.error("output path is required when processing a single file")
-        
-        if not os.path.exists(args.input):
-            parser.error(f"Input file '{args.input}' not found")
-        
-        # Create output directory if it doesn't exist
-        output_dir = os.path.dirname(args.output)
-        if output_dir and not os.path.exists(output_dir):
-            os.makedirs(output_dir)
-        
-        print(f"Input image: {args.input}")
-        print(f"Output image: {args.output}")
-        print(f"Brightness mapping: {args.bottom}-{args.top} (8-bit) → 0-65535 (16-bit)")
-        
-        # Process single file with optimized function
-        with Image.open(args.input) as img:
-            if img.mode != 'L':
-                img = img.convert('L')
-            img_array = np.asarray(img, dtype=np.uint8)
-        
-        print(f"Input image shape: {img_array.shape}")
-        print(f"Input brightness range: {img_array.min()}-{img_array.max()}")
+            parser.error("--output is required with --input")
+        success = process_single(args.input, args.output, args.top, args.bottom)
+        if not success:
+            sys.exit(1)
 
-        # Use optimized scaling
-        scaled_array = scale_brightness_optimized(img_array, args.top, args.bottom)
-        
-        print(f"Output brightness range: {scaled_array.min()}-{scaled_array.max()}")
-
-        # Save with optimization
-        out_img = Image.fromarray(scaled_array, mode="I;16")
-        out_img.save(args.output, optimize=True)
-        
-        print(f"16-bit scaled image saved to: {args.output}")
 
 if __name__ == "__main__":
     main()

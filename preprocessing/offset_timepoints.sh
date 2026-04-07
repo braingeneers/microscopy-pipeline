@@ -4,19 +4,27 @@
 # Example: ./offset_timepoints.sh ./data 5
 # Example: ./offset_timepoints.sh ./data -3
 
-FOLDER="$1"
-OFFSET="$2"
-
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --input)  FOLDER="$2";  shift 2 ;;
+        --offset) OFFSET="$2";  shift 2 ;;
+        *)
+            echo "Unknown argument: $1"
+            echo "Usage: $0 --input FOLDER --offset N"
+            exit 1 ;;
+    esac
+done
+ 
 if [[ -z "$FOLDER" || -z "$OFFSET" ]]; then
-    echo "Usage: $0 <folder> <offset>"
+    echo "Usage: $0 --input FOLDER --offset N"
     exit 1
 fi
-
+ 
 shopt -s nullglob
-
+ 
 # Create an array to store files with their N values
 declare -a files_with_n=()
-
+ 
 # First pass: collect files and extract N values
 for file in "$FOLDER"/*_zs*; do
     basename=$(basename "$file")
@@ -25,7 +33,7 @@ for file in "$FOLDER"/*_zs*; do
         files_with_n+=("$N:$file")
     fi
 done
-
+ 
 # Sort the array based on offset direction
 if [[ $OFFSET -ge 0 ]]; then
     # Positive offset: sort in reverse order (highest N first)
@@ -37,7 +45,7 @@ else
     echo "Processing files in forward order (lowest N first) for negative offset"
 fi
 unset IFS
-
+ 
 # Second pass: rename files in appropriate order
 for entry in "${sorted_files[@]}"; do
     N="${entry%%:*}"
