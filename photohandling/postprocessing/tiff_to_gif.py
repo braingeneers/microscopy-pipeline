@@ -1,31 +1,28 @@
 import os
 import re
-from PIL import Image
 import sys
+import argparse
+from PIL import Image
 import numpy as np
+
+from pipeline_log import get_logger
+log = get_logger("tiff_to_gif")
+
 
 def normalize_16bit_to_8bit(image):
     """Convert 16-bit image to 8-bit by normalizing the intensity range"""
     if image.mode in ['I;16', 'I;16B', 'I;16L', 'I']:
-        # Convert to numpy array
         arr = np.array(image)
-        
-        # Check if it's actually 16-bit data
         if arr.max() > 255:
-            print(f"    16-bit image detected (max value: {arr.max()})")
-            # Normalize to 0-255 range
+            log.info("    16-bit image detected (max value: %d)", arr.max())
             if arr.max() > arr.min():
                 arr_normalized = ((arr - arr.min()) / (arr.max() - arr.min()) * 255).astype(np.uint8)
             else:
                 arr_normalized = np.zeros_like(arr, dtype=np.uint8)
-            
-            # Convert back to PIL Image
             return Image.fromarray(arr_normalized, mode='L')
         else:
-            # Data is already in 8-bit range
             return image.convert('L')
     else:
-        # Already 8-bit or other format
         return image
 
 def get_tiff_files(folder):
@@ -42,43 +39,38 @@ def get_tiff_files(folder):
 def tiff_to_gif(folder, output_gif):
     tiff_files = get_tiff_files(folder)
     if not tiff_files:
-        print("No matching TIFF files found.")
+        log.warning("No matching TIFF files found in: %s", folder)
         return
-    
-    print(f"Found {len(tiff_files)} TIFF files to process")
+
+    log.info("CONVERT START | files=%d input=%s output=%s",
+             len(tiff_files), folder, output_gif)
     images = []
-    
+
     for i, tiff_file in enumerate(tiff_files, 1):
-        print(f"Processing [{i}/{len(tiff_files)}]: {os.path.basename(tiff_file)}")
-        
+        log.info("[%d/%d] Processing: %s", i, len(tiff_files), os.path.basename(tiff_file))
         try:
-            # Open image
             img = Image.open(tiff_file)
-            print(f"    Image mode: {img.mode}, size: {img.size}")
-            
-            # Handle 16-bit images
+            log.info("    mode=%s size=%s", img.mode, img.size)
+
             if img.mode in ['I;16', 'I;16B', 'I;16L', 'I']:
-                img_normalized = normalize_16bit_to_8bit(img)
-                img_rgb = img_normalized.convert('RGB')
-                print(f"    Normalized 16-bit to 8-bit RGB")
+                img_rgb = normalize_16bit_to_8bit(img).convert('RGB')
+                log.info("    Normalized 16-bit to 8-bit RGB")
             else:
-                # Convert other modes to RGB
                 img_rgb = img.convert('RGB')
-                print(f"    Converted to RGB")
-            
+                log.info("    Converted to RGB")
+
             images.append(img_rgb)
-            
+
         except Exception as e:
-            print(f"    Error processing {tiff_file}: {e}")
+            log.error("    Error processing %s: %s", tiff_file, e)
             continue
-    
+
     if not images:
-        print("No images could be processed successfully.")
-        return
-    
-    print(f"\nCreating animated GIF with {len(images)} frames...")
-    
-    # Save as animated GIF
+        log.error("No images could be processed successfully")
+        sys.exit(1)
+
+    log.info("Creating animated GIF | frames=%d", len(images))
+
     images[0].save(
         output_gif,
         save_all=True,
@@ -87,28 +79,40 @@ def tiff_to_gif(folder, output_gif):
         loop=0,
         optimize=True
     )
-    
-    print(f"Animated GIF saved as {output_gif}")
-    print(f"Frame count: {len(images)}")
-    print(f"Duration per frame: 10ms")
+
+    log.info("CONVERT END | status=complete frames=%d duration_per_frame=10ms output=%s",
+             len(images), output_gif)
+
+# CLI
+# 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        print("Usage: python tiff_to_gif.py <tiff_folder> <output_gif>")
-        print()
-        print("Description:")
-        print("  Converts a series of TIFF files to an animated GIF")
-        print("  Looks for files matching pattern: stack_N_edf.tif")
-        print("  Supports both 8-bit and 16-bit TIFF images")
-        print()
-        print("Examples:")
-        print("  python tiff_to_gif.py ./tiff_stack animation.gif")
-        print("  python tiff_to_gif.py ./microscopy_images timelapse.gif")
-        print()
-        print("Features:")
-        print("  - Automatic 16-bit to 8-bit normalization")
-        print("  - Natural sorting by stack number")
-        print("  - Progress reporting")
-        print("  - Error handling for individual files")
-    else:
-        tiff_to_gif(sys.argv[1], sys.argv[2])
+    parser = argparse.ArgumentParser(
+        description="Convert a sequence of TIFF files into an animated GIF.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+EXAMPLES
+  python tiff_to_gif.py --input ./tiff_stack --output animation.gif
+  python tiff_to_gif.py --input ./microscopy_images --output timelapse.gif
+
+FILE PATTERN
+  Looks for files matching: stack_N_edf.tif
+  Files are sorted by N value and assembled in order.
+
+BIT DEPTH
+  8-bit TIFFs are used as-is.
+  16-bit TIFFs are normalized to 0-255 before inclusion.
+        """
+    )
+
+    parser.add_argument("--input",  metavar="DIR", required=True,
+                        help="Folder containing TIFF files")
+    parser.add_argument("--output", metavar="FILE", required=True,
+                        help="Output GIF file path")
+
+    args = parser.parse_args()
+
+    if not os.path.isdir(args.input):
+        parser.error(f"Input folder not found: {args.input}")
+
+    tiff_to_gif(args.input, args.output)
