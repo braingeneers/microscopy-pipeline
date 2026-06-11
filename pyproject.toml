@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "microscopy-pipeline"
+version = "0.1.0"
+description = "Unified microscopy image-processing pipeline: composable ops + task-to-task workflows."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "Braingeneers / OOI" }]
+keywords = ["microscopy", "image-processing", "organoid", "fluorescence", "edf"]
+dependencies = [
+    "numpy",
+    "Pillow",
+    "opencv-python",
+    "PyWavelets",
+    "pandas",
+    "matplotlib",
+    "scipy",
+    "scikit-image",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[project.scripts]
+# Each legacy script is exposed as an installable command (mirrors the cli() of
+# the corresponding microscopy_pipeline.ops module).
+mp-align = "microscopy_pipeline.ops.align:cli"
+mp-brightfield-organoid-tracker = "microscopy_pipeline.ops.brightfield_organoid_tracker:cli"
+mp-clahe = "microscopy_pipeline.ops.clahe:cli"
+mp-complex-edf = "microscopy_pipeline.ops.complex_edf:cli"
+mp-crop = "microscopy_pipeline.ops.crop:cli"
+mp-extract-times = "microscopy_pipeline.ops.extract_times:cli"
+mp-find-max-brightness = "microscopy_pipeline.ops.find_max_brightness:cli"
+mp-fuse-tiffs = "microscopy_pipeline.ops.fuse_tiffs:cli"
+mp-graph-contour-data = "microscopy_pipeline.ops.graph_contour_data:cli"
+mp-grey-to-color = "microscopy_pipeline.ops.grey_to_color:cli"
+mp-identify-core = "microscopy_pipeline.ops.identify_core:cli"
+mp-mask = "microscopy_pipeline.ops.mask:cli"
+mp-plot-summed-fluorescence = "microscopy_pipeline.ops.plot_summed_fluorescence:cli"
+mp-pngs-to-tiff = "microscopy_pipeline.ops.pngs_to_tiff:cli"
+mp-remove-lone-pixels = "microscopy_pipeline.ops.remove_lone_pixels:cli"
+mp-scale-bar = "microscopy_pipeline.ops.scale_bar:cli"
+mp-scale-brightness = "microscopy_pipeline.ops.scale_brightness:cli"
+mp-scale-colors = "microscopy_pipeline.ops.scale_colors:cli"
+mp-sum-fluorescence = "microscopy_pipeline.ops.sum_fluorescence:cli"
+mp-tiff-to-gif = "microscopy_pipeline.ops.tiff_to_gif:cli"
+
+[tool.setuptools]
+packages = ["microscopy_pipeline", "microscopy_pipeline.ops"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
