@@ -29,11 +29,11 @@ from .complex_edf import (
     complex_edf_file,
     complex_edf_folder,
 )
-from .fuse_tiffs import fuse_average, fuse_average_file, fuse_average_folder
+from .fuse_tiffs import fuse_project, fuse_average, fuse_average_file, fuse_average_folder
 from .clahe import clahe, clahe_file, clahe_folder
 from .grey_to_color import grey_to_color, grey_to_color_file, grey_to_color_folder
 from .scale_bar import add_scale_bar, add_scale_bar_file, add_scale_bar_folder
-from .tiff_to_gif import tiff_to_gif, frames_to_gif
+from .tiff_to_gif import tiff_to_gif, frames_to_gif, frames_to_video
 from .scale_brightness import (
     scale_brightness,
     scale_brightness_file,
@@ -68,8 +68,8 @@ __all__ = [
     # stack ops
     "pngs_to_tiff_stacks", "group_pngs_by_x",
     "complex_edf", "complex_edf_image", "complex_edf_file", "complex_edf_folder",
-    "fuse_average", "fuse_average_file", "fuse_average_folder",
-    "tiff_to_gif", "frames_to_gif",
+    "fuse_project", "fuse_average", "fuse_average_file", "fuse_average_folder",
+    "tiff_to_gif", "frames_to_gif", "frames_to_video",
     # annotation
     "add_scale_bar", "add_scale_bar_file", "add_scale_bar_folder",
     # analysis

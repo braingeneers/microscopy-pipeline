@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
 
 import numpy as np
 
 from .. import io
-from ..cli import build_io_parser
+from ..cli import build_io_parser, add_folder_flags
 
 
 def crop(image: np.ndarray, *, left: int = 0, top: int = 0, right: int = 0, bottom: int = 0) -> np.ndarray:
@@ -34,11 +35,13 @@ def crop_file(input_path, output_path, *, left=0, top=0, right=0, bottom=0):
         io.save_image(crop(arr, left=left, top=top, right=right, bottom=bottom), output_path)
 
 
-def crop_folder(input_dir, output_dir, *, left=0, top=0, right=0, bottom=0):
+def crop_folder(input_dir, output_dir, *, left=0, top=0, right=0, bottom=0,
+                jobs=1, skip_existing=False):
     """Crop every image (or stack) in ``input_dir`` into ``output_dir``."""
     output_dir = io.ensure_dir(output_dir)
-    for src in io.list_images(input_dir):
-        crop_file(str(src), str(output_dir / src.name), left=left, top=top, right=right, bottom=bottom)
+    pairs = [(src, output_dir / src.name) for src in io.list_images(input_dir)]
+    io.map_folder(pairs, partial(crop_file, left=left, top=top, right=right, bottom=bottom),
+                  jobs=jobs, skip_existing=skip_existing, desc="crop")
 
 
 def cli(argv=None):
@@ -47,10 +50,12 @@ def cli(argv=None):
     parser.add_argument("--top", type=int, default=0)
     parser.add_argument("--right", type=int, default=0)
     parser.add_argument("--bottom", type=int, default=0)
+    add_folder_flags(parser)
     args = parser.parse_args(argv)
     src = Path(args.input)
     if src.is_dir():
-        crop_folder(args.input, args.output, left=args.left, top=args.top, right=args.right, bottom=args.bottom)
+        crop_folder(args.input, args.output, left=args.left, top=args.top, right=args.right, bottom=args.bottom,
+                    jobs=args.jobs, skip_existing=args.skip_existing)
     else:
         crop_file(args.input, args.output, left=args.left, top=args.top, right=args.right, bottom=args.bottom)
 

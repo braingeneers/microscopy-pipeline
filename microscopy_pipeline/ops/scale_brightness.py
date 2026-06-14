@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
 
 import cv2
 import numpy as np
 
 from .. import io
-from ..cli import build_io_parser
+from ..cli import build_io_parser, add_folder_flags
 
 
 def scale_brightness(image: np.ndarray, *, factor: float = 1.0) -> np.ndarray:
@@ -27,19 +28,22 @@ def scale_brightness_file(input_path, output_path, *, factor: float):
     io.save_image(scale_brightness(arr, factor=factor), output_path)
 
 
-def scale_brightness_folder(input_dir, output_dir, *, factor: float):
+def scale_brightness_folder(input_dir, output_dir, *, factor: float, jobs=1, skip_existing=False):
     output_dir = io.ensure_dir(output_dir)
-    for src in io.list_images(input_dir):
-        scale_brightness_file(str(src), str(output_dir / src.name), factor=factor)
+    pairs = [(src, output_dir / src.name) for src in io.list_images(input_dir)]
+    io.map_folder(pairs, partial(scale_brightness_file, factor=factor),
+                  jobs=jobs, skip_existing=skip_existing, desc="scale-brightness")
 
 
 def cli(argv=None):
     parser = build_io_parser("Multiply image brightness by a scalar factor.")
     parser.add_argument("--factor", type=float, required=True, help="Brightness multiplier.")
+    add_folder_flags(parser)
     args = parser.parse_args(argv)
     src = Path(args.input)
     if src.is_dir():
-        scale_brightness_folder(args.input, args.output, factor=args.factor)
+        scale_brightness_folder(args.input, args.output, factor=args.factor,
+                                jobs=args.jobs, skip_existing=args.skip_existing)
     else:
         scale_brightness_file(args.input, args.output, factor=args.factor)
 

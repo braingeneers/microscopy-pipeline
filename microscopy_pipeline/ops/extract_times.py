@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import logging
 import os
 import re
 from datetime import datetime
@@ -10,7 +11,9 @@ from pathlib import Path
 from typing import Iterable, List, Optional
 
 from .. import io
-from ..cli import build_io_parser
+from ..cli import build_io_parser, configure_logging
+
+logger = logging.getLogger(__name__)
 
 _FILENAME_PATTERN = re.compile(r"^(\d+)_zs.*")
 
@@ -95,7 +98,7 @@ def extract_times(
             writer = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
             writer.writeheader()
             writer.writerows(rows)
-    print(f"wrote {len(rows)} rows to {csv_path}")
+    logger.info("wrote %d rows to %s", len(rows), csv_path)
     return rows
 
 
@@ -107,6 +110,7 @@ def cli(argv=None):
     parser.add_argument("--time-offset", default="0",
                         help="Offset added to elapsed times (seconds, MM:SS, or HH:MM:SS[.sss]; may be negative).")
     args = parser.parse_args(argv)
+    configure_logging(args.verbose)
     if not Path(args.input).is_dir():
         parser.error(f"input must be a directory: {args.input}")
     offset = parse_time_offset(args.time_offset)

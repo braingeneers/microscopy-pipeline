@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import csv
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple
 
 import numpy as np
 
-from ..cli import build_io_parser
+from ..cli import build_io_parser, configure_logging
+
+logger = logging.getLogger(__name__)
 
 _TIMESTAMP_FORMATS = [
     "%Y-%m-%d %H:%M:%S",
@@ -161,7 +164,7 @@ def plot_fluorescence(
     if output_path:
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
         plt.savefig(output_path, format="svg", bbox_inches="tight")
-        print(f"plot saved to {output_path}")
+        logger.info("plot saved to %s", output_path)
     if show:
         plt.show()
     plt.close()
@@ -183,6 +186,7 @@ def cli(argv=None):
     parser.add_argument("--days-limit", type=float, default=None)
     parser.add_argument("--show", action="store_true")
     args = parser.parse_args(argv)
+    configure_logging(args.verbose)
     plot_fluorescence(
         args.input, args.output,
         window_size=args.window_size,

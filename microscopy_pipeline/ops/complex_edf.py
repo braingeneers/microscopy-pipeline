@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+from functools import partial
 from pathlib import Path
 from typing import Sequence, Tuple
 
@@ -9,7 +11,9 @@ import numpy as np
 import pywt
 
 from .. import io
-from ..cli import build_io_parser
+from ..cli import build_io_parser, configure_logging, add_folder_flags
+
+logger = logging.getLogger(__name__)
 
 
 def complex_edf(
@@ -69,8 +73,8 @@ def complex_edf(
             fc = np.zeros_like(complex_list[0])
             fd = np.zeros_like(cD_list[0])
             for i in range(n):
-                fc += np.choose(top_indices[i], cstack)
-                fd += np.choose(top_indices[i], dstack)
+                fc += np.take_along_axis(cstack, top_indices[i][None], axis=0)[0]
+                fd += np.take_along_axis(dstack, top_indices[i][None], axis=0)[0]
             fused_coeffs.append((fc / n, fd / n))
         else:
             mags = np.stack([np.abs(c) for c in level_coeffs], axis=0)
@@ -82,7 +86,7 @@ def complex_edf(
                 z_indices.extend(top_indices.flatten())
             fa = np.zeros_like(level_coeffs[0])
             for i in range(n):
-                fa += np.choose(top_indices[i], cstack)
+                fa += np.take_along_axis(cstack, top_indices[i][None], axis=0)[0]
             fused_coeffs.append(fa / n)
 
     fused = reconstruct(fused_coeffs)
@@ -127,22 +131,28 @@ def complex_edf_file(input_path, output_path, *, wavelet="db3", levels=3,
                                        bit_depth=bit_depth, top_n=top_n, invert=invert)
     out = fused.astype(np.uint16) if bit_depth == 16 else fused.astype(np.uint8)
     io.save_image(out, output_path)
-    print(f"  z range used: {min_z}..{max_z} ({len(frames)} frames)")
+    logger.info("z range used: %d..%d (%d frames)", min_z, max_z, len(frames))
     return min_z, max_z
 
 
+def _edf_file_logged(input_path, output_path, **kw):
+    """Picklable wrapper that logs (rather than raises) per-file EDF failures."""
+    try:
+        return complex_edf_file(input_path, output_path, **kw)
+    except Exception as exc:  # pragma: no cover
+        logger.warning("failed: %s: %s", Path(input_path).name, exc)
+        return None
+
+
 def complex_edf_folder(input_dir, output_dir, *, wavelet="db3", levels=3,
-                       bit_depth=16, top_n=1, invert=False):
+                       bit_depth=16, top_n=1, invert=False, jobs=1, skip_existing=False):
     output_dir = io.ensure_dir(output_dir)
-    for src in sorted(Path(input_dir).iterdir()):
-        if src.suffix.lower() not in (".tif", ".tiff"):
-            continue
-        out = output_dir / f"{src.stem}_edf.tif"
-        try:
-            complex_edf_file(str(src), str(out), wavelet=wavelet, levels=levels,
-                             bit_depth=bit_depth, top_n=top_n, invert=invert)
-        except Exception as exc:  # pragma: no cover
-            print(f"  failed: {src.name}: {exc}")
+    pairs = [(src, output_dir / f"{src.stem}_edf.tif")
+             for src in sorted(Path(input_dir).iterdir())
+             if src.suffix.lower() in (".tif", ".tiff")]
+    io.map_folder(pairs, partial(_edf_file_logged, wavelet=wavelet, levels=levels,
+                                 bit_depth=bit_depth, top_n=top_n, invert=invert),
+                  jobs=jobs, skip_existing=skip_existing, desc="edf")
 
 
 def cli(argv=None):
@@ -155,11 +165,14 @@ def cli(argv=None):
     parser.add_argument("--top-n", type=int, default=1, help="Average the top N sharpest layers per pixel.")
     parser.add_argument("--invert", action="store_true",
                         help="Select least-sharp coefficients (legacy invertedcomplexedf behaviour).")
+    add_folder_flags(parser)
     args = parser.parse_args(argv)
+    configure_logging(args.verbose)
     src = Path(args.input)
     if src.is_dir():
         complex_edf_folder(args.input, args.output, wavelet=args.wavelet, levels=args.levels,
-                           bit_depth=args.bit_depth, top_n=args.top_n, invert=args.invert)
+                           bit_depth=args.bit_depth, top_n=args.top_n, invert=args.invert,
+                           jobs=args.jobs, skip_existing=args.skip_existing)
     else:
         complex_edf_file(args.input, args.output, wavelet=args.wavelet, levels=args.levels,
                          bit_depth=args.bit_depth, top_n=args.top_n, invert=args.invert)

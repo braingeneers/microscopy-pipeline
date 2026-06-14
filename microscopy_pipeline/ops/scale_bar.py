@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
 from typing import Tuple
 
@@ -9,7 +10,7 @@ import cv2
 import numpy as np
 
 from .. import io
-from ..cli import build_io_parser
+from ..cli import build_io_parser, add_folder_flags
 from .mask import parse_color
 
 
@@ -52,8 +53,13 @@ def add_scale_bar(
     return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
 
-def add_scale_bar_file(input_path, output_path, *, scale_um, pixel_size_um,
+def add_scale_bar_file(input_path, output_path, *, scale_um, pixel_size_um=None,
                        bar_height=10, margin=30, color="white", label=True):
+    if pixel_size_um is None:
+        pixel_size_um = io.read_pixel_size_um(input_path)
+    if pixel_size_um is None:
+        raise ValueError(
+            f"pixel_size_um not provided and no resolution metadata found in {input_path}")
     img = cv2.imread(str(input_path))
     if img is None:
         raise FileNotFoundError(input_path)
@@ -66,28 +72,37 @@ def add_scale_bar_file(input_path, output_path, *, scale_um, pixel_size_um,
         raise IOError(f"failed to save {output_path}")
 
 
-def add_scale_bar_folder(input_dir, output_dir, *, scale_um, pixel_size_um,
-                         bar_height=10, margin=30, color="white", label=True):
+def add_scale_bar_folder(input_dir, output_dir, *, scale_um, pixel_size_um=None,
+                         bar_height=10, margin=30, color="white", label=True,
+                         jobs=1, skip_existing=False):
     output_dir = io.ensure_dir(output_dir)
-    for src in io.list_images(input_dir):
-        add_scale_bar_file(str(src), str(output_dir / src.name),
-                           scale_um=scale_um, pixel_size_um=pixel_size_um,
-                           bar_height=bar_height, margin=margin, color=color, label=label)
+    pairs = [(src, output_dir / src.name) for src in io.list_images(input_dir)]
+    io.map_folder(pairs, partial(add_scale_bar_file, scale_um=scale_um, pixel_size_um=pixel_size_um,
+                                 bar_height=bar_height, margin=margin, color=color, label=label),
+                  jobs=jobs, skip_existing=skip_existing, desc="scale-bar")
 
 
 def cli(argv=None):
     parser = build_io_parser("Add a scale bar (and optional label) to microscopy images.")
     parser.add_argument("--scale-um", type=float, required=True, help="Scale bar length in micrometres.")
-    parser.add_argument("--pixel-size-um", type=float, required=True, help="Pixel size in micrometres.")
+    parser.add_argument("--pixel-size-um", type=float, default=None,
+                        help="Pixel size in micrometres (default: read from image TIFF metadata).")
     parser.add_argument("--bar-height", type=int, default=10)
     parser.add_argument("--margin", type=int, default=30)
     parser.add_argument("--color", default="white")
     parser.add_argument("--no-label", action="store_true", help="Suppress the text label.")
+    add_folder_flags(parser)
     args = parser.parse_args(argv)
     src = Path(args.input)
-    fn = add_scale_bar_folder if src.is_dir() else add_scale_bar_file
-    fn(args.input, args.output, scale_um=args.scale_um, pixel_size_um=args.pixel_size_um,
-       bar_height=args.bar_height, margin=args.margin, color=args.color, label=not args.no_label)
+    if src.is_dir():
+        add_scale_bar_folder(args.input, args.output, scale_um=args.scale_um,
+                             pixel_size_um=args.pixel_size_um, bar_height=args.bar_height,
+                             margin=args.margin, color=args.color, label=not args.no_label,
+                             jobs=args.jobs, skip_existing=args.skip_existing)
+    else:
+        add_scale_bar_file(args.input, args.output, scale_um=args.scale_um,
+                           pixel_size_um=args.pixel_size_um, bar_height=args.bar_height,
+                           margin=args.margin, color=args.color, label=not args.no_label)
 
 
 if __name__ == "__main__":

@@ -96,6 +96,7 @@ def focal_stack_to_gif(
     bar_margin: int = 5,
     duration_ms: int = 100,
     loop: int = 0,
+    normalize: str = "global",
 ) -> Path:
     """Turn a per-timepoint focal-stack time-series into an annotated GIF.
 
@@ -136,7 +137,12 @@ def focal_stack_to_gif(
         frames.append(rgb)
 
     output_path = Path(output_path)
-    ops.frames_to_gif(frames, str(output_path), duration_ms=duration_ms, loop=loop)
+    if output_path.suffix.lower() in {".mp4", ".mov", ".avi", ".mkv"}:
+        fps = max(1, round(1000.0 / duration_ms)) if duration_ms else 10
+        ops.frames_to_video(frames, str(output_path), fps=fps, normalize=normalize)
+    else:
+        ops.frames_to_gif(frames, str(output_path), duration_ms=duration_ms, loop=loop,
+                          normalize=normalize)
     return output_path
 
 
@@ -203,6 +209,7 @@ def align_crop_colorize(
     channel: str = "red",
     gamma: float = 1.0,
     output_dir: Optional[PathLike] = None,
+    warp_mode: Optional[int] = None,
 ) -> List[np.ndarray]:
     """Register a frame series, crop borders, normalize brightness, colorize.
 
@@ -218,7 +225,8 @@ def align_crop_colorize(
     given, each RGB result is also written as ``frame_NNN.png``.  Returns the list
     of RGB arrays.
     """
-    aligned = ops.align_stack(frames, reference=reference)
+    _align_kw = {} if warp_mode is None else {"warp_mode": warp_mode}
+    aligned = ops.align_stack(frames, reference=reference, **_align_kw)
     left, top, right, bottom = crop
     out_dir = io.ensure_dir(output_dir) if output_dir is not None else None
 

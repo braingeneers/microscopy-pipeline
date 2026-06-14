@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Iterable, List, Tuple, Union
+from typing import Iterable, List, Optional, Union
 
 import numpy as np
 from PIL import Image
@@ -172,6 +172,7 @@ def save_stack(
     imagej: bool = True,
     compression: str | None = "tiff_lzw",
     extra_tags: dict | None = None,
+    pixel_size_um: Optional[float] = None,
 ) -> None:
     """Save a list/iterable of 2-D arrays as a multi-frame TIFF stack.
 
@@ -208,12 +209,68 @@ def save_stack(
             305: "ImageJ",
             269: f"Stack ({n} slices)",
         }
+    if pixel_size_um:
+        tiff_tags.update(resolution_tags_for_pixel_size(pixel_size_um))
     if extra_tags:
         tiff_tags.update(extra_tags)
     if tiff_tags:
         save_kwargs["tiffinfo"] = tiff_tags
 
     pils[0].save(path, **save_kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Pixel-size (physical resolution) metadata
+# ---------------------------------------------------------------------------
+
+# TIFF tag ids: XResolution=282, YResolution=283, ResolutionUnit=296
+# ResolutionUnit values: 1=none/relative, 2=inch, 3=centimetre.
+_UNIT_UM = {2: 25400.0, 3: 10000.0}  # micrometres per resolution unit
+
+
+def read_pixel_size_um(path: PathLike) -> Optional[float]:
+    """Return micrometres-per-pixel from a TIFF's resolution tags, or ``None``.
+
+    Returns ``None`` when the tags are absent, the unit is relative (1), or the
+    values are unusable -- callers fall back to an explicit ``--pixel-size``.
+    """
+    try:
+        with Image.open(path) as img:
+            tags = getattr(img, "tag_v2", None)
+            unit = tags.get(296, 2) if tags else None
+            xres = tags.get(282) if tags else None
+            yres = tags.get(283) if tags else None
+    except Exception:
+        return None
+    if unit not in _UNIT_UM:
+        return None
+
+    def _to_float(v):
+        try:
+            if isinstance(v, tuple):
+                num, den = v
+                return float(num) / float(den) if den else None
+            return float(v)
+        except Exception:
+            return None
+
+    per_unit = [r for r in (_to_float(xres), _to_float(yres)) if r and r > 0]
+    if not per_unit:
+        return None
+    pixels_per_unit = sum(per_unit) / len(per_unit)
+    return _UNIT_UM[unit] / pixels_per_unit
+
+
+def resolution_tags_for_pixel_size(pixel_size_um: Optional[float]) -> dict:
+    """Build cm-based TIFF resolution tags for a given micrometres-per-pixel."""
+    if not pixel_size_um or pixel_size_um <= 0:
+        return {}
+    from PIL.TiffImagePlugin import IFDRational
+    pixels_per_cm = 10000.0 / float(pixel_size_um)
+    # A single RATIONAL value (count 1); a bare (num, den) tuple is misread by
+    # PIL as two separate entries.
+    res = IFDRational(int(round(pixels_per_cm * 1000)), 1000)
+    return {282: res, 283: res, 296: 3}
 
 
 # ---------------------------------------------------------------------------
@@ -236,31 +293,40 @@ def ensure_dir(path: PathLike) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Generic batch helper used by op CLIs.
+# Folder batch helper: optional skip-existing (resume) + parallel jobs.
 # ---------------------------------------------------------------------------
 
-def batch_apply(
-    input_dir: PathLike,
-    output_dir: PathLike,
-    func,
-    *,
-    exts: Iterable[str] = IMAGE_EXTS,
-    keep_name: bool = True,
-) -> Tuple[int, int]:
-    """Apply ``func(in_path, out_path)`` to every image in ``input_dir``.
+def _progress(iterable, *, desc=None, total=None):
+    """Wrap ``iterable`` in a tqdm progress bar if tqdm is installed; else passthrough."""
+    try:
+        from tqdm import tqdm  # optional dependency
+    except Exception:
+        return iterable
+    return tqdm(iterable, desc=desc, total=total)
 
-    Returns ``(n_success, n_failed)``.
+
+def map_folder(pairs, func, *, jobs: int = 1, skip_existing: bool = False, desc=None) -> List:
+    """Apply ``func(src_str, dst_str)`` over ``(src, dst)`` path pairs.
+
+    * ``skip_existing`` skips any pair whose destination already exists (resume).
+    * ``jobs > 1`` runs via a ``ProcessPoolExecutor`` (so ``func`` and its bound
+      arguments must be picklable -- pass a module-level function or
+      ``functools.partial`` of one, never a lambda/closure); ``jobs <= 1`` runs
+      serially.
+
+    Results are returned in input order, with ``None`` for skipped pairs.
     """
-    input_dir = Path(input_dir)
-    output_dir = ensure_dir(output_dir)
-    files = list_images(input_dir, exts=exts)
-    ok = fail = 0
-    for src in files:
-        dst = output_dir / src.name if keep_name else output_dir / src.name
-        try:
-            func(str(src), str(dst))
-            ok += 1
-        except Exception as exc:  # pragma: no cover -- diagnostic only
-            print(f"  failed: {src.name}: {exc}")
-            fail += 1
-    return ok, fail
+    pairs = [(Path(s), Path(d)) for s, d in pairs]
+    pending = [(i, s, d) for i, (s, d) in enumerate(pairs)
+               if not (skip_existing and d.exists())]
+    results: List = [None] * len(pairs)
+    if jobs and int(jobs) > 1 and len(pending) > 1:
+        from concurrent.futures import ProcessPoolExecutor
+        with ProcessPoolExecutor(max_workers=int(jobs)) as ex:
+            fut_to_idx = {ex.submit(func, str(s), str(d)): i for i, s, d in pending}
+            for fut, i in fut_to_idx.items():
+                results[i] = fut.result()
+    else:
+        for i, s, d in _progress(pending, desc=desc):
+            results[i] = func(str(s), str(d))
+    return results

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import logging
 import re
 from pathlib import Path
 from typing import Optional
@@ -12,7 +13,9 @@ import numpy as np
 from PIL import Image
 
 from .. import io
-from ..cli import build_io_parser
+from ..cli import build_io_parser, configure_logging, add_folder_flags
+
+logger = logging.getLogger(__name__)
 
 _TIMEPOINT_PATTERNS = [
     re.compile(r"_(\d+)$"),
@@ -164,10 +167,15 @@ def track_organoid_folder(
     *,
     pixel_size_um: Optional[float] = None,
     contour_color=(0, 255, 0), contour_thickness: int = 2,
+    skip_existing: bool = False,
     **detection_params,
 ):
     """Process a folder of brightfield images; writes detailed + summary CSVs."""
     output_dir = io.ensure_dir(output_dir)
+    results_csv = Path(output_dir) / "organoid_analysis_results.csv"
+    if skip_existing and results_csv.exists():
+        logger.info("skip (exists): %s", results_csv)
+        return []
     # Route through io.list_images so the tracker accepts whatever its
     # predecessors emit (PNG/TIFF/...), not just .tif/.tiff.  This is what lets
     # a clahe/crop/scale_brightness -> tracker chain actually carry data.
@@ -184,9 +192,10 @@ def track_organoid_folder(
         res["filename"] = src.name
         res["timepoint"] = timepoint
         res["output_filename"] = out.name
-        if pixel_size_um and res["area_pixels"] > 0:
-            res["area_um2"] = res["area_pixels"] * pixel_size_um ** 2
-            res["perimeter_um"] = res["perimeter"] * pixel_size_um
+        ps = pixel_size_um if pixel_size_um is not None else io.read_pixel_size_um(str(src))
+        if ps and res["area_pixels"] > 0:
+            res["area_um2"] = res["area_pixels"] * ps ** 2
+            res["perimeter_um"] = res["perimeter"] * ps
         else:
             res["area_um2"] = 0.0
             res["perimeter_um"] = 0.0
@@ -229,7 +238,9 @@ def cli(argv=None):
     parser.add_argument("--clahe-clip-limit", type=float, default=2.0)
     parser.add_argument("--clahe-tile-grid", type=int, default=8)
     parser.add_argument("--otsu-adjustment", type=int, default=10)
+    add_folder_flags(parser, jobs=False)
     args = parser.parse_args(argv)
+    configure_logging(args.verbose)
     params = dict(
         min_area=args.min_area,
         gaussian_blur=args.gaussian_blur,
@@ -244,7 +255,8 @@ def cli(argv=None):
     src = Path(args.input)
     if src.is_dir():
         track_organoid_folder(args.input, args.output,
-                              pixel_size_um=args.pixel_size_um, **params)
+                              pixel_size_um=args.pixel_size_um,
+                              skip_existing=args.skip_existing, **params)
     else:
         track_organoid_file(args.input, args.output, **params)
 

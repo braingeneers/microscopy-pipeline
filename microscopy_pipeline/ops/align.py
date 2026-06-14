@@ -6,6 +6,7 @@ Filenames follow ``{timepoint}_zs+{z}.png`` and outputs are written as
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 from pathlib import Path
@@ -15,7 +16,16 @@ import cv2
 import numpy as np
 
 from .. import io
-from ..cli import build_io_parser
+from ..cli import build_io_parser, configure_logging
+
+logger = logging.getLogger(__name__)
+
+WARP_MODES = {
+    "translation": cv2.MOTION_TRANSLATION,
+    "euclidean": cv2.MOTION_EUCLIDEAN,
+    "affine": cv2.MOTION_AFFINE,
+    "homography": cv2.MOTION_HOMOGRAPHY,
+}
 
 
 def align_pair(reference: np.ndarray, moving: np.ndarray, *,
@@ -72,6 +82,7 @@ def align_session(
     base_z: int,
     reference_image: Optional[str] = None,
     temporal: bool = True,
+    warp_mode: int = cv2.MOTION_TRANSLATION,
 ):
     """Align an entire timepoint x z-stack acquisition session."""
     input_dir = Path(input_dir)
@@ -90,19 +101,19 @@ def align_session(
         # Reference / temporal alignment of base image
         curr_base = cv2.imread(str(base_src))
         if curr_base is None:
-            print(f"  missing base image for tp={tp}: {base_src}")
+            logger.warning("missing base image for tp=%d: %s", tp, base_src)
             continue
 
         wrote_base = False
         if ref_img is not None and (not temporal or tp == min_timepoint):
-            aligned = align_pair(ref_img, curr_base)
+            aligned = align_pair(ref_img, curr_base, warp_mode=warp_mode)
             cv2.imwrite(str(base_out), aligned)
             wrote_base = True
         if temporal and tp > min_timepoint:
             prev = output_dir / f"{tp-1}_{base_z}.png"
             prev_img = cv2.imread(str(prev)) if prev.exists() else cv2.imread(str(input_dir / f"{tp-1}_zs+{base_z}.png"))
             if prev_img is not None:
-                aligned = align_pair(prev_img, curr_base)
+                aligned = align_pair(prev_img, curr_base, warp_mode=warp_mode)
                 cv2.imwrite(str(base_out), aligned)
                 wrote_base = True
         if not wrote_base and not base_out.exists():
@@ -117,7 +128,7 @@ def align_session(
             mov = cv2.imread(str(src))
             if mov is None:
                 continue
-            aligned = align_pair(ref_for_z, mov)
+            aligned = align_pair(ref_for_z, mov, warp_mode=warp_mode)
             cv2.imwrite(str(output_dir / f"{tp}_{z}.png"), aligned)
 
 
@@ -136,7 +147,10 @@ def cli(argv=None):
                         help="Optional reference image to align the (first) timepoint to.")
     parser.add_argument("--no-temporal", action="store_true",
                         help="Disable temporal alignment between timepoints.")
+    parser.add_argument("--warp-mode", choices=list(WARP_MODES), default="translation",
+                        help="ECC motion model (default: translation).")
     args = parser.parse_args(argv)
+    configure_logging(args.verbose)
     align_session(
         input_dir=args.input,
         output_dir=args.output,
@@ -148,6 +162,7 @@ def cli(argv=None):
         base_z=args.base_z,
         reference_image=args.reference_image,
         temporal=not args.no_temporal,
+        warp_mode=WARP_MODES[args.warp_mode],
     )
 
 

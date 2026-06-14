@@ -7,6 +7,7 @@ The algorithm and parameters match the original; only the entry point
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Optional
 
@@ -19,7 +20,9 @@ from skimage import measure, morphology
 from skimage.draw import polygon as sk_polygon
 
 from .. import io
-from ..cli import build_io_parser
+from ..cli import build_io_parser, configure_logging, add_folder_flags
+
+logger = logging.getLogger(__name__)
 
 
 def identify_core(
@@ -178,7 +181,7 @@ def identify_core_file(input_path, output_dir, *, core_thresh_percentile=90,
     res = identify_core(img, core_thresh_percentile=core_thresh_percentile,
                         outer_thresh_percentile=outer_thresh_percentile)
     if res is None:
-        print(f"  no regions found in {input_path}")
+        logger.warning("no regions found in %s", input_path)
         return None
     if save_contours:
         _save_overlay(res, Path(input_path).stem, Path(output_dir))
@@ -186,9 +189,13 @@ def identify_core_file(input_path, output_dir, *, core_thresh_percentile=90,
 
 
 def identify_core_folder(input_dir, output_dir, *, core_thresh_percentile=90,
-                         outer_thresh_percentile=40):
+                         outer_thresh_percentile=40, skip_existing=False):
     """Process a folder; writes ``core_analysis_results.csv`` under ``output_dir``."""
     output_dir = io.ensure_dir(output_dir)
+    results_csv = Path(output_dir) / "core_analysis_results.csv"
+    if skip_existing and results_csv.exists():
+        logger.info("skip (exists): %s", results_csv)
+        return []
     contours_dir = io.ensure_dir(Path(output_dir) / "contours")
     outer_dir = io.ensure_dir(Path(output_dir) / "outer_regions")
     rows = []
@@ -224,7 +231,7 @@ def identify_core_folder(input_dir, output_dir, *, core_thresh_percentile=90,
         })
     if rows:
         pd.DataFrame(rows).to_csv(Path(output_dir) / "core_analysis_results.csv", index=False)
-    print(f"processed {len(rows)} images")
+    logger.info("processed %d images", len(rows))
     return rows
 
 
@@ -236,14 +243,17 @@ def cli(argv=None):
                         help="Percentile threshold for core brightness (0..100).")
     parser.add_argument("--outer-threshold", type=float, default=40,
                         help="Lower percentile threshold for outer brightness (0..100).")
+    add_folder_flags(parser, jobs=False)
     args = parser.parse_args(argv)
+    configure_logging(args.verbose)
     if not (0 <= args.outer_threshold < args.core_threshold <= 100):
         parser.error("require 0 <= outer-threshold < core-threshold <= 100")
     src = Path(args.input)
     if src.is_dir():
         identify_core_folder(args.input, args.output,
                              core_thresh_percentile=args.core_threshold,
-                             outer_thresh_percentile=args.outer_threshold)
+                             outer_thresh_percentile=args.outer_threshold,
+                             skip_existing=args.skip_existing)
     else:
         identify_core_file(args.input, args.output,
                            core_thresh_percentile=args.core_threshold,

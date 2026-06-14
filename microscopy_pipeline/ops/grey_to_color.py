@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
 from .. import io
-from ..cli import build_io_parser
+from ..cli import build_io_parser, add_folder_flags
 
 CHANNEL_INDEX = {"red": 0, "green": 1, "blue": 2}
 
@@ -49,20 +50,25 @@ def grey_to_color_file(input_path, output_path, *, channel: str = "red", gamma: 
     Image.fromarray(out, mode="RGB").save(output_path)
 
 
-def grey_to_color_folder(input_dir, output_dir, *, channel: str = "red", gamma: float = 1.0):
+def grey_to_color_folder(input_dir, output_dir, *, channel: str = "red", gamma: float = 1.0,
+                         jobs=1, skip_existing=False):
     output_dir = io.ensure_dir(output_dir)
-    for src in io.list_images(input_dir, exts={".png", ".tif", ".tiff"}):
-        grey_to_color_file(str(src), str(output_dir / src.name), channel=channel, gamma=gamma)
+    pairs = [(src, output_dir / src.name)
+             for src in io.list_images(input_dir, exts={".png", ".tif", ".tiff"})]
+    io.map_folder(pairs, partial(grey_to_color_file, channel=channel, gamma=gamma),
+                  jobs=jobs, skip_existing=skip_existing, desc="grey-to-color")
 
 
 def cli(argv=None):
     parser = build_io_parser("Colorise grayscale images by routing the gray value into one RGB channel.")
     parser.add_argument("--channel", choices=list(CHANNEL_INDEX), required=True)
     parser.add_argument("--gamma", type=float, default=1.0)
+    add_folder_flags(parser)
     args = parser.parse_args(argv)
     src = Path(args.input)
     if src.is_dir():
-        grey_to_color_folder(args.input, args.output, channel=args.channel, gamma=args.gamma)
+        grey_to_color_folder(args.input, args.output, channel=args.channel, gamma=args.gamma,
+                             jobs=args.jobs, skip_existing=args.skip_existing)
     else:
         grey_to_color_file(args.input, args.output, channel=args.channel, gamma=args.gamma)
 

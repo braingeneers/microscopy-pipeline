@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
 from typing import Tuple, Union
 
@@ -9,7 +10,7 @@ import numpy as np
 from PIL import Image, ImageFilter
 
 from .. import io
-from ..cli import build_io_parser
+from ..cli import build_io_parser, add_folder_flags
 
 ColorLike = Union[str, int, Tuple[int, int, int]]
 
@@ -147,11 +148,13 @@ def mask_file(input_path, output_path, mask_path, *, replace_color="red", feathe
         io.save_image(mask(arr, mask_path, replace_color=replace_color, feather_radius=feather_radius), output_path)
 
 
-def mask_folder(input_dir, output_dir, mask_path, *, replace_color="red", feather_radius=0.0):
+def mask_folder(input_dir, output_dir, mask_path, *, replace_color="red", feather_radius=0.0,
+                jobs=1, skip_existing=False):
     output_dir = io.ensure_dir(output_dir)
-    for src in io.list_images(input_dir):
-        mask_file(str(src), str(output_dir / src.name), mask_path,
-                  replace_color=replace_color, feather_radius=feather_radius)
+    pairs = [(src, output_dir / src.name) for src in io.list_images(input_dir)]
+    io.map_folder(pairs, partial(mask_file, mask_path=mask_path,
+                                 replace_color=replace_color, feather_radius=feather_radius),
+                  jobs=jobs, skip_existing=skip_existing, desc="mask")
 
 
 def cli(argv=None):
@@ -161,11 +164,13 @@ def cli(argv=None):
     parser.add_argument("--mask", required=True, help="Path to mask image (black = replace, white = keep).")
     parser.add_argument("--replace-color", default="red", help="Replacement color (name, #hex, R,G,B, or scalar).")
     parser.add_argument("--feather-radius", type=float, default=0.0, help="Gaussian feather radius in pixels.")
+    add_folder_flags(parser)
     args = parser.parse_args(argv)
     src = Path(args.input)
     if src.is_dir():
         mask_folder(args.input, args.output, args.mask,
-                    replace_color=args.replace_color, feather_radius=args.feather_radius)
+                    replace_color=args.replace_color, feather_radius=args.feather_radius,
+                    jobs=args.jobs, skip_existing=args.skip_existing)
     else:
         mask_file(args.input, args.output, args.mask,
                   replace_color=args.replace_color, feather_radius=args.feather_radius)

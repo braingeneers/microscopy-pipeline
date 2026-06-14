@@ -70,6 +70,28 @@ workflows.focal_stack_to_gif("aligned_pngs/", "movie.gif",
                              scale_um=100, pixel_size_um=0.5)
 ```
 
+## Data flow & filename conventions
+
+Stages are glued together by filename patterns, so the conventions matter:
+
+```
+raw  {tp}_zs+{z}.png                      acquisition: timepoint tp, z-slice z
+  → align            {tp}_zs+{z}.png → {tp}_{z}.png          (ECC registration)
+  → pngs_to_tiff     {X}_{Y}.png     → stack_{X}.tiff        (one stack per X)
+  → complex_edf      stack_{X}.tiff  → stack_{X}_edf.tif     (depth fusion; or fuse_tiffs)
+  → tiff_to_gif / sum_fluorescence / brightfield_organoid_tracker → GIF, CSVs, plots
+```
+
+`extract_times` reads the raw `{N}_zs*` files into a timestamps CSV that the
+fluorescence summation can merge in.
+
+## Further reference
+
+See **[REPO_MAP.md](REPO_MAP.md)** for the full agent-facing capability map —
+every op annotated, the detailed data-flow conventions, and the branch points
+where alternative approaches can be trialed. **[PLAN.md](PLAN.md)** tracks the
+in-progress remediation work.
+
 ## Install
 
 ```bash

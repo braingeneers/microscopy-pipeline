@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from collections import defaultdict
 from pathlib import Path
@@ -11,7 +12,9 @@ import numpy as np
 from PIL import Image
 
 from .. import io
-from ..cli import build_io_parser
+from ..cli import build_io_parser, configure_logging
+
+logger = logging.getLogger(__name__)
 
 _PNG_PATTERN = re.compile(r"(\d+)_(-?\d+)\.png$")
 
@@ -70,7 +73,7 @@ def pngs_to_tiff_stacks(input_dir, output_dir, *, bit_depth: int | None = None) 
         compression = "tiff_lzw" if depth == 8 else None
         io.save_stack(frames, out, imagej=True, compression=compression)
         outputs.append(out)
-        print(f"wrote {out} ({len(frames)} slices, {depth}-bit)")
+        logger.info("wrote %s (%d slices, %d-bit)", out, len(frames), depth)
     return outputs
 
 
@@ -81,6 +84,7 @@ def cli(argv=None):
     parser.add_argument("--bit-depth", type=int, choices=(8, 16), default=None,
                         help="Force output bit depth (default: derive from input).")
     args = parser.parse_args(argv)
+    configure_logging(args.verbose)
     pngs_to_tiff_stacks(args.input, args.output, bit_depth=args.bit_depth)
 
 

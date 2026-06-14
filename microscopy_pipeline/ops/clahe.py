@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -9,7 +10,7 @@ import cv2
 import numpy as np
 
 from .. import io
-from ..cli import build_io_parser
+from ..cli import build_io_parser, add_folder_flags
 
 
 def clahe(
@@ -57,11 +58,13 @@ def clahe_file(input_path, output_path, *, clip_limit=2.0, tile_grid_size=(8, 8)
         io.save_image(out, output_path)
 
 
-def clahe_folder(input_dir, output_dir, *, clip_limit=2.0, tile_grid_size=(8, 8), channel=None):
+def clahe_folder(input_dir, output_dir, *, clip_limit=2.0, tile_grid_size=(8, 8), channel=None,
+                 jobs=1, skip_existing=False):
     output_dir = io.ensure_dir(output_dir)
-    for src in io.list_images(input_dir):
-        clahe_file(str(src), str(output_dir / src.name),
-                   clip_limit=clip_limit, tile_grid_size=tile_grid_size, channel=channel)
+    pairs = [(src, output_dir / src.name) for src in io.list_images(input_dir)]
+    io.map_folder(pairs, partial(clahe_file, clip_limit=clip_limit,
+                                 tile_grid_size=tile_grid_size, channel=channel),
+                  jobs=jobs, skip_existing=skip_existing, desc="clahe")
 
 
 def cli(argv=None):
@@ -72,12 +75,14 @@ def cli(argv=None):
     parser.add_argument("--tile-grid", type=int, default=8, help="Tile grid size (creates NxN grid).")
     parser.add_argument("--channel", choices=["red", "green", "blue"], default=None,
                         help="Apply CLAHE to this RGB channel only (default: grayscale).")
+    add_folder_flags(parser)
     args = parser.parse_args(argv)
     grid = (args.tile_grid, args.tile_grid)
     src = Path(args.input)
     if src.is_dir():
         clahe_folder(args.input, args.output, clip_limit=args.clip_limit,
-                     tile_grid_size=grid, channel=args.channel)
+                     tile_grid_size=grid, channel=args.channel,
+                     jobs=args.jobs, skip_existing=args.skip_existing)
     else:
         clahe_file(args.input, args.output, clip_limit=args.clip_limit,
                    tile_grid_size=grid, channel=args.channel)

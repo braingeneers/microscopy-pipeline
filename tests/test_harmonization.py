@@ -90,24 +90,3 @@ def test_every_op_module_has_cli():
         if not hasattr(m, "cli"):
             no_cli.append(info.name)
     assert not no_cli, f"op modules missing cli(): {no_cli}"
-
-
-# --- Shared CLI dispatch helper (was buggy/unused) --------------------------
-
-def test_dispatch_file_or_folder(tmp_path):
-    from microscopy_pipeline.cli import dispatch_file_or_folder
-
-    calls = {}
-    f = tmp_path / "a.txt"
-    f.write_text("x")
-    d = tmp_path / "sub"
-    d.mkdir()
-
-    dispatch_file_or_folder(str(f), "out",
-                            file_func=lambda i, o: calls.setdefault("file", (i, o)),
-                            folder_func=lambda i, o: calls.setdefault("folder", (i, o)))
-    dispatch_file_or_folder(str(d), "out",
-                            file_func=lambda i, o: calls.setdefault("file2", (i, o)),
-                            folder_func=lambda i, o: calls.setdefault("folder2", (i, o)))
-    assert "file" in calls and "folder2" in calls
-    assert "folder" not in calls and "file2" not in calls

@@ -24,6 +24,8 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest"]
+progress = ["tqdm"]          # optional progress bars for folder ops
+video = ["imageio[ffmpeg]"]  # optional MP4/MOV/AVI output for tiff_to_gif
 
 [project.scripts]
 # Each legacy script is exposed as an installable command (mirrors the cli() of
