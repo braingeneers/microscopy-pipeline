@@ -26,6 +26,7 @@ dependencies = [
 test = ["pytest"]
 progress = ["tqdm"]          # optional progress bars for folder ops
 video = ["imageio[ffmpeg]"]  # optional MP4/MOV/AVI output for tiff_to_gif
+ome = ["tifffile"]           # optional OME-TIFF read/write (to_ome_tiff, pixel-size metadata)
 
 [project.scripts]
 # Each legacy script is exposed as an installable command (mirrors the cli() of
@@ -50,6 +51,7 @@ mp-scale-brightness = "microscopy_pipeline.ops.scale_brightness:cli"
 mp-scale-colors = "microscopy_pipeline.ops.scale_colors:cli"
 mp-sum-fluorescence = "microscopy_pipeline.ops.sum_fluorescence:cli"
 mp-tiff-to-gif = "microscopy_pipeline.ops.tiff_to_gif:cli"
+mp-to-ome-tiff = "microscopy_pipeline.ops.to_ome_tiff:cli"
 
 [tool.setuptools]
 packages = ["microscopy_pipeline", "microscopy_pipeline.ops"]

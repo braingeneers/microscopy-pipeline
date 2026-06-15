@@ -519,6 +519,12 @@ imageio[ffmpeg] is heavyweight and platform-sensitive, so it must stay an option
 
 **Status:** net_new | **Category:** capability | **Effort:** L
 
+> **Update (2026-06):** sub-item (3) **OME-TIFF I/O is now implemented** (no longer deferred) —
+> `io.save_ome_tiff` / `io.read_ome_metadata`, `save_stack` auto-routing for `*.ome.tif`,
+> OME-XML pixel size in `read_pixel_size_um`, and the `mp-to-ome-tiff` op, behind the optional
+> `[ome]` extra (`tifffile`). Bio-Formats/napari, plus sub-items (1) ML segmentation and
+> (2) GPU/tiled, remain deferred.
+
 **Where:**
 - `microscopy_pipeline/ops/identify_core.py`
 - `microscopy_pipeline/ops/brightfield_organoid_tracker.py`

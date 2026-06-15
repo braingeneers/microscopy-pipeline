@@ -34,6 +34,7 @@ from .clahe import clahe, clahe_file, clahe_folder
 from .grey_to_color import grey_to_color, grey_to_color_file, grey_to_color_folder
 from .scale_bar import add_scale_bar, add_scale_bar_file, add_scale_bar_folder
 from .tiff_to_gif import tiff_to_gif, frames_to_gif, frames_to_video
+from .to_ome_tiff import to_ome_tiff_file, to_ome_tiff_folder
 from .scale_brightness import (
     scale_brightness,
     scale_brightness_file,
@@ -70,6 +71,7 @@ __all__ = [
     "complex_edf", "complex_edf_image", "complex_edf_file", "complex_edf_folder",
     "fuse_project", "fuse_average", "fuse_average_file", "fuse_average_folder",
     "tiff_to_gif", "frames_to_gif", "frames_to_video",
+    "to_ome_tiff_file", "to_ome_tiff_folder",
     # annotation
     "add_scale_bar", "add_scale_bar_file", "add_scale_bar_folder",
     # analysis

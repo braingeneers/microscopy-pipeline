@@ -85,6 +85,23 @@ raw  {tp}_zs+{z}.png                      acquisition: timepoint tp, z-slice z
 `extract_times` reads the raw `{N}_zs*` files into a timestamps CSV that the
 fluorescence summation can merge in.
 
+## OME-TIFF
+
+Read/write OME-TIFF with the physical pixel size embedded in OME-XML, for
+hand-off to Fiji/Bio-Formats, napari or QuPath. Needs the optional `tifffile`
+backend (`pip install -e ".[ome]"`):
+
+```python
+from microscopy_pipeline import io
+io.save_ome_tiff(frames, "stack.ome.tif", pixel_size_um=0.5)
+io.read_ome_metadata("stack.ome.tif")    # {'pixel_size_um': 0.5, 'axes': 'ZYX', ...}
+```
+
+Or from the CLI: `mp-to-ome-tiff -i in/ -o out/ --pixel-size-um 0.5`. Any op that
+writes to a `*.ome.tif` path emits OME-TIFF automatically, and the
+`--pixel-size`-aware ops (scale bar, organoid tracker) read the calibration
+straight from OME files.
+
 ## Further reference
 
 See **[REPO_MAP.md](REPO_MAP.md)** for the full agent-facing capability map —

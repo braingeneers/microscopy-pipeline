@@ -183,6 +183,9 @@ def save_stack(
     frames = [np.asarray(f) for f in frames]
     if not frames:
         raise ValueError("Cannot save empty stack")
+    if is_ome_path(path):
+        save_ome_tiff(frames, path, pixel_size_um=pixel_size_um)
+        return
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     pils = [array_to_pil(f) for f in frames]
     bit_depth = 16 if frames[0].dtype == np.uint16 else 8
@@ -229,11 +232,15 @@ _UNIT_UM = {2: 25400.0, 3: 10000.0}  # micrometres per resolution unit
 
 
 def read_pixel_size_um(path: PathLike) -> Optional[float]:
-    """Return micrometres-per-pixel from a TIFF's resolution tags, or ``None``.
+    """Return micrometres-per-pixel from OME-XML or TIFF resolution tags, or ``None``.
 
-    Returns ``None`` when the tags are absent, the unit is relative (1), or the
-    values are unusable -- callers fall back to an explicit ``--pixel-size``.
+    OME-TIFF physical pixel size (stored in OME-XML) takes precedence; otherwise
+    the XResolution/YResolution tags are used.  ``None`` when nothing usable is
+    found -- callers fall back to an explicit ``--pixel-size``.
     """
+    ome = _read_ome_pixel_size_um(path)
+    if ome is not None:
+        return ome
     try:
         with Image.open(path) as img:
             tags = getattr(img, "tag_v2", None)
@@ -271,6 +278,119 @@ def resolution_tags_for_pixel_size(pixel_size_um: Optional[float]) -> dict:
     # PIL as two separate entries.
     res = IFDRational(int(round(pixels_per_cm * 1000)), 1000)
     return {282: res, 283: res, 296: 3}
+
+
+# ---------------------------------------------------------------------------
+# OME-TIFF (physical metadata via OME-XML; needs the optional 'tifffile' package)
+# ---------------------------------------------------------------------------
+
+_OME_UNIT_UM = {
+    "µm": 1.0, "um": 1.0, "micron": 1.0, "microns": 1.0, "micrometer": 1.0,
+    "nm": 1e-3, "mm": 1e3, "cm": 1e4, "m": 1e6,
+}
+
+
+def is_ome_path(path: PathLike) -> bool:
+    """True if ``path`` has an OME-TIFF extension (``.ome.tif`` / ``.ome.tiff``)."""
+    name = Path(path).name.lower()
+    return name.endswith(".ome.tif") or name.endswith(".ome.tiff")
+
+
+def _require_tifffile():
+    try:
+        import tifffile
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError(
+            "OME-TIFF support requires the optional 'tifffile' package "
+            "(pip install 'microscopy-pipeline[ome]')") from exc
+    return tifffile
+
+
+def save_ome_tiff(frames, path: PathLike, *, pixel_size_um: Optional[float] = None,
+                  channel_names=None, axes: Optional[str] = None) -> None:
+    """Write frames as an OME-TIFF, embedding physical pixel size in OME-XML.
+
+    ``frames`` may be a single 2-D array or a list of 2-D frames (a stack).
+    ``pixel_size_um`` is written as OME ``PhysicalSizeX/Y`` in micrometres.
+    """
+    tifffile = _require_tifffile()
+    if isinstance(frames, np.ndarray):
+        frames = [frames]
+    frames = [np.asarray(f) for f in frames]
+    if not frames:
+        raise ValueError("Cannot save empty stack")
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    data = frames[0] if len(frames) == 1 else np.stack(frames, axis=0)
+    # Treat a trailing length-3/4 axis as RGB(A) samples, not a Z/T dimension.
+    is_rgb = data.ndim >= 3 and data.shape[-1] in (3, 4)
+    if axes is None:
+        if is_rgb:
+            axes = "YXS" if data.ndim == 3 else "ZYXS"
+        else:
+            axes = "YX" if data.ndim == 2 else ("ZYX" if data.ndim == 3 else "TZYX")
+    photometric = "rgb" if is_rgb else "minisblack"
+    metadata: dict = {"axes": axes}
+    if pixel_size_um:
+        metadata.update({
+            "PhysicalSizeX": float(pixel_size_um), "PhysicalSizeXUnit": "µm",
+            "PhysicalSizeY": float(pixel_size_um), "PhysicalSizeYUnit": "µm",
+        })
+    if channel_names:
+        metadata["Channel"] = {"Name": list(channel_names)}
+    try:
+        tifffile.imwrite(str(path), data, photometric=photometric,
+                         metadata=metadata, ome=True)
+    except TypeError:
+        # Older tifffile: OME is inferred from the .ome.tif extension + metadata.
+        tifffile.imwrite(str(path), data, photometric=photometric, metadata=metadata)
+
+
+def _parse_ome_pixel_size_um(xml: str) -> Optional[float]:
+    import re
+    m = re.search(r'PhysicalSizeX="([0-9.eE+\-]+)"', xml or "")
+    if not m:
+        return None
+    try:
+        value = float(m.group(1))
+    except ValueError:
+        return None
+    if value <= 0:
+        return None
+    unit_m = re.search(r'PhysicalSizeXUnit="([^"]+)"', xml)
+    unit = (unit_m.group(1) if unit_m else "µm").replace("μ", "µ")  # normalise micro sign
+    return value * _OME_UNIT_UM.get(unit, 1.0)
+
+
+def _read_ome_pixel_size_um(path: PathLike) -> Optional[float]:
+    """OME-XML physical pixel size in micrometres, or None (no tifffile / not OME)."""
+    if not is_tiff_path(path):
+        return None  # avoid opening PNG/JPEG inputs with tifffile (scale_bar hot path)
+    try:
+        tifffile = _require_tifffile()
+    except RuntimeError:
+        return None
+    try:
+        with tifffile.TiffFile(path) as tif:
+            if not tif.is_ome or not tif.ome_metadata:
+                return None
+            return _parse_ome_pixel_size_um(tif.ome_metadata)
+    except Exception:
+        return None
+
+
+def read_ome_metadata(path: PathLike) -> dict:
+    """Return basic OME metadata: ``pixel_size_um``, ``axes``, ``shape``, ``dtype``."""
+    tifffile = _require_tifffile()
+    with tifffile.TiffFile(path) as tif:
+        if not tif.is_ome:
+            raise ValueError(f"not an OME-TIFF: {path}")
+        series = tif.series[0]
+        return {
+            "pixel_size_um": _parse_ome_pixel_size_um(tif.ome_metadata or ""),
+            "axes": series.axes,
+            "shape": tuple(series.shape),
+            "dtype": str(series.dtype),
+        }
 
 
 # ---------------------------------------------------------------------------
