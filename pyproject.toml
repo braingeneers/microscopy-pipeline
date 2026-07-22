@@ -45,6 +45,7 @@ mp-identify-core = "microscopy_pipeline.ops.identify_core:cli"
 mp-mask = "microscopy_pipeline.ops.mask:cli"
 mp-plot-summed-fluorescence = "microscopy_pipeline.ops.plot_summed_fluorescence:cli"
 mp-pngs-to-tiff = "microscopy_pipeline.ops.pngs_to_tiff:cli"
+mp-pulsatility = "pulsatility.pulsatility:cli"
 mp-remove-lone-pixels = "microscopy_pipeline.ops.remove_lone_pixels:cli"
 mp-scale-bar = "microscopy_pipeline.ops.scale_bar:cli"
 mp-scale-brightness = "microscopy_pipeline.ops.scale_brightness:cli"
@@ -54,7 +55,7 @@ mp-tiff-to-gif = "microscopy_pipeline.ops.tiff_to_gif:cli"
 mp-to-ome-tiff = "microscopy_pipeline.ops.to_ome_tiff:cli"
 
 [tool.setuptools]
-packages = ["microscopy_pipeline", "microscopy_pipeline.ops"]
+packages = ["microscopy_pipeline", "microscopy_pipeline.ops", "pulsatility"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
