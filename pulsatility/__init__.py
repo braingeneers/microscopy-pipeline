@@ -33,21 +33,31 @@ See :func:`pulsatility.pulsatility.analyze_pulsatility` for the array-level core
 """
 
 from .pulsatility import (  # noqa: F401
+    MAX_ROIS,
     PulsatilityResult,
+    Region,
     analyze_pulsatility,
     analyze_pulsatility_video,
+    build_roi_masks,
     load_video_gray,
     motion_signal,
+    motion_signals,
     plot_pulsatility,
+    plot_pulsatility_multi,
     cli,
 )
 
 __all__ = [
+    "MAX_ROIS",
     "PulsatilityResult",
+    "Region",
     "analyze_pulsatility",
     "analyze_pulsatility_video",
+    "build_roi_masks",
     "load_video_gray",
     "motion_signal",
+    "motion_signals",
     "plot_pulsatility",
+    "plot_pulsatility_multi",
     "cli",
 ]

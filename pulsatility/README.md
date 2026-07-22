@@ -73,6 +73,89 @@ print(result.bpm_spectral, "pulses/min")
 | `--fps` | from file | Override the frame rate if the container metadata is wrong |
 | `--frame-stride` | `1` | Analyze every Nth frame (fps scaled accordingly) |
 | `--pixel-size-um` | — | If given, wave amplitudes are additionally reported in µm/s |
+| `--roi` | — | A region-of-interest rectangle to measure separately. **Repeatable, up to 5.** See below |
+| `--roi-units` | `pixel` | Whether `--roi` coordinates are original-video pixels or `fraction`s (0–1) of the frame |
+| `--roi-mask` | — | A label image whose distinct non-zero values each define an ROI (for hand-drawn / non-rectangular regions) |
+
+## Regions of interest (up to 5)
+
+By default the tool measures pulsatility over the **whole frame**. Often you want
+it for **specific regions** instead — a patch of parenchyma next to a vessel vs.
+one further away, left vs. right hemisphere, or to *exclude* a big vessel,
+surgical instrument or gauze that would otherwise dominate the signal. You can
+give up to **five** ROIs; each is analysed independently and the whole field is
+always included as a reference.
+
+### How to use it
+
+Pass one `--roi X,Y,W,H` per region (repeat for more), where `X,Y` is the
+top-left corner and `W,H` the width/height **in pixels of the original video**
+(the numbers you read off the video in any player, ImageJ, QuickTime, etc.).
+Give each a name with a `name=` prefix so the plots and table are labelled:
+
+```bash
+mp-pulsatility -i Pulsatility_video.mp4 -o results_roi/ \
+    --roi "vessels=150,420,570,200" \
+    --roi "top-edge=100,50,300,170" \
+    --roi "lower-right=560,580,320,260"
+```
+
+If you'd rather not read pixel coordinates, use fractions of the frame
+(`0,0` = top-left, `1,1` = bottom-right):
+
+```bash
+mp-pulsatility -i video.mp4 -o out/ --roi-units fraction \
+    --roi "center=0.35,0.4,0.3,0.25" --roi "corner=0.0,0.0,0.25,0.25"
+```
+
+For **non-rectangular** regions (e.g. tracing a gyrus), paint a *label image* the
+same size as a video frame — background 0, region 1 in one grey level, region 2
+in another, and so on (up to 5) — save it as PNG and pass `--roi-mask labels.png`.
+Draw it in ImageJ/Fiji, Photoshop, GIMP or napari; the values just need to be
+distinct.
+
+From Python:
+
+```python
+from pulsatility import analyze_pulsatility_video
+
+r = analyze_pulsatility_video(
+    "video.mp4", "out/",
+    rois=["vessels=150,420,570,200", "edge=100,50,300,170"],  # up to 5
+    roi_units="pixel",           # or "fraction"
+    # roi_mask="labels.png",     # alternative: a hand-drawn label image
+)
+per_roi = r.extras["roi_results"]          # dict: name -> PulsatilityResult
+print(per_roi["vessels"].bpm_spectral, per_roi["vessels"].pulsatility_index)
+```
+
+### Picking good coordinates without a GUI
+
+This tool is headless (no click-to-draw window), so the intended workflow is:
+
+1. **Run once with no ROI.** The `pulsatility_amplitude_map.png` ("where it
+   pulses") shows exactly where the tissue moves most — read approximate box
+   coordinates off it.
+2. **Add `--roi` boxes** over the regions you care about and re-run.
+3. **Check placement.** Every ROI run writes `pulsatility_rois.png` with your
+   boxes drawn on a reference frame, so you can nudge the numbers and repeat.
+
+### Extra outputs when ROIs are given
+
+In addition to the whole-field artifacts above, an ROI run also writes:
+
+| File | Contents |
+|------|----------|
+| `pulsatility_rois.png` | Comparison figure: overlaid per-ROI waves, overlaid spectra, the reference frame with labelled ROI boxes, and a metrics table |
+| `pulsatility_roi_waveforms.csv` | Time column + the pulsatility wave and raw motion of every region (whole field + each ROI) |
+| `pulsatility_roi_summary.txt` | Per-region metrics table (rate, CV, PI, amplitude, SNR, pulse count) |
+
+`results_roi/` in this folder holds a worked example (the three ROIs above): the
+`vessels` box shows ~8× the wave amplitude and a far cleaner spectrum (88% SNR)
+than the quiet `top-edge` box (25% SNR, no coherent pulse) — exactly the kind of
+region-to-region contrast the multi-ROI mode is for.
+
+![ROI comparison](results_roi/pulsatility_rois.png)
 
 ## Metrics
 
@@ -117,8 +200,12 @@ perivascular signal we will want to track in brain parenchyma.
 * **Frequency / wave** — Hann-windowed, zero-padded FFT locates the fundamental;
   a 2nd-order zero-phase Butterworth band-pass around it yields the clean wave;
   `scipy.signal.find_peaks` counts pulses.
+* **Regions of interest** — `--roi`/`--roi-mask` restrict the measurement to up
+  to five named regions (see above), analysed alongside the whole field in a
+  single motion pass.
 * **Generalising to brain** — the algorithm is tissue-agnostic. For surgical
-  video the main additions worth trialing are camera-shake stabilisation before
-  flow (the surgeon/scope moves), an ROI mask to the exposed cortex, and
-  narrowing `--min-bpm/--max-bpm` to the cardiac band to reject respiratory and
-  handling motion.
+  video the moves that matter are: mask the exposed cortex with `--roi` (and keep
+  instruments/gauze out of the box), narrow `--min-bpm/--max-bpm` to the cardiac
+  band to reject respiratory and handling motion, and — the one piece not yet
+  built — add camera-shake stabilisation before the flow step, since the scope
+  and surgeon move.
