@@ -1,0 +1,10 @@
+Bulk parenchymal pulsatility
+==============================
+method                : optical-flow
+pulse rate (spectral) :  118.3 pulses/min (1.972 Hz)
+pulse rate (peaks)    :  118.3 pulses/min over 35 pulses
+rate variability (CV) :   7.3 %
+pulsatility index     :  1.934  (modulation depth of tissue motion)
+wave amplitude (RMS)  :   0.0691 px/frame
+wave amplitude (p2p)  :   0.1857 px/frame
+spectral SNR          :  78.7 % of band power at the fundamental
