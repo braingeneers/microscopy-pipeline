@@ -73,17 +73,19 @@ print(result.bpm_spectral, "pulses/min")
 | `--fps` | from file | Override the frame rate if the container metadata is wrong |
 | `--frame-stride` | `1` | Analyze every Nth frame (fps scaled accordingly) |
 | `--pixel-size-um` | — | If given, wave amplitudes are additionally reported in µm/s |
-| `--roi` | — | A region-of-interest rectangle to measure separately. **Repeatable, up to 5.** See below |
+| `--stabilize` | off | Remove global camera / scope shake before analysis (ECC align each frame to a reference). Strongly recommended for hand-held / surgical video |
+| `--stabilize-mode` | `euclidean` | Stabilization transform: `translation`, or `euclidean` (translation + rotation) |
+| `--roi` | — | A region-of-interest rectangle to measure separately. **Repeatable, up to 8.** See below |
 | `--roi-units` | `pixel` | Whether `--roi` coordinates are original-video pixels or `fraction`s (0–1) of the frame |
 | `--roi-mask` | — | A label image whose distinct non-zero values each define an ROI (for hand-drawn / non-rectangular regions) |
 
-## Regions of interest (up to 5)
+## Regions of interest (up to 8)
 
 By default the tool measures pulsatility over the **whole frame**. Often you want
 it for **specific regions** instead — a patch of parenchyma next to a vessel vs.
 one further away, left vs. right hemisphere, or to *exclude* a big vessel,
 surgical instrument or gauze that would otherwise dominate the signal. You can
-give up to **five** ROIs; each is analysed independently and the whole field is
+give up to **eight** ROIs; each is analysed independently and the whole field is
 always included as a reference.
 
 ### How to use it
@@ -110,7 +112,7 @@ mp-pulsatility -i video.mp4 -o out/ --roi-units fraction \
 
 For **non-rectangular** regions (e.g. tracing a gyrus), paint a *label image* the
 same size as a video frame — background 0, region 1 in one grey level, region 2
-in another, and so on (up to 5) — save it as PNG and pass `--roi-mask labels.png`.
+in another, and so on (up to 8) — save it as PNG and pass `--roi-mask labels.png`.
 Draw it in ImageJ/Fiji, Photoshop, GIMP or napari; the values just need to be
 distinct.
 
@@ -121,7 +123,7 @@ from pulsatility import analyze_pulsatility_video
 
 r = analyze_pulsatility_video(
     "video.mp4", "out/",
-    rois=["vessels=150,420,570,200", "edge=100,50,300,170"],  # up to 5
+    rois=["vessels=150,420,570,200", "edge=100,50,300,170"],  # up to 8
     roi_units="pixel",           # or "fraction"
     # roi_mask="labels.png",     # alternative: a hand-drawn label image
 )
@@ -192,6 +194,41 @@ actual parenchyma. Whole-field motion there is dominated by camera shake,
 instruments and harmonics — on the surgical clip the whole frame reports ~146
 ppm (the 2nd harmonic) while a cortex ROI recovers the true ~73 ppm cardiac
 rate.
+
+## Stabilization (`--stabilize`)
+
+Hand-held or surgical-scope video shakes. That whole-field camera motion adds a
+spurious *uniform* flow to every pixel each frame, which swamps the subtle local
+pulsation. `--stabilize` estimates a global rigid transform (translation, or
+translation + rotation) from every frame to a reference frame with ECC and warps
+it back — cancelling the shake while leaving *local* tissue deformation (the
+pulsatility) intact. It is cheap (~4 ms/frame) and often decisive: on the
+surgical clip a cortex ROI jumps from a spurious 30 ppm at 15 % SNR to the true
+~73 ppm at ~33 % SNR once stabilized. `stabilize_frames(frames, mode=...)` is the
+importable core.
+
+## Separating breathing from cardiac pulsatility
+
+In perfused tissue the pulsatility carries **two** rhythms: the cardiac pulse and
+a slower **respiratory** oscillation. Breathing is not just additive — it
+modulates the *amplitude* of each cardiac pulse (a real respiratory
+pulse-pressure variation) — so it is often useful to see the pulsatility both
+with and without it.
+
+`decompose_respiration(signal, fps)` splits a motion signal into the
+respiratory-band wave, the cardiac pulsatility as measured (breathing-modulated),
+and the cardiac pulsatility with the respiratory amplitude modulation
+**deconvolved out**; it reports the breathing rate, the cardiac rate, and a
+`modulation_index` (depth of respiratory modulation of the pulse ≈ pulse-pressure
+variation). `plot_breathing_decomposition` renders the with/without figure.
+
+```python
+from pulsatility import decompose_respiration, plot_breathing_decomposition
+
+resp = decompose_respiration(cortex_signal, fps, resp_bpm=(6, 30), cardiac_bpm=(40, 140))
+print(resp.cardiac_bpm, resp.resp_bpm, resp.modulation_index)  # e.g. 72.5, 7.3, 0.42
+plot_breathing_decomposition(resp, "breathing.png")
+```
 
 ## Metrics
 

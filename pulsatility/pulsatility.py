@@ -115,13 +115,84 @@ def load_video_gray(
     return frames, effective_fps
 
 
+def stabilize_frames(
+    frames: Sequence[np.ndarray],
+    *,
+    mode: str = "euclidean",
+    reference: str = "mid",
+    max_iters: int = 200,
+    eps: float = 1e-4,
+    gauss_filt: int = 5,
+) -> List[np.ndarray]:
+    """Remove global camera / scope shake by aligning every frame to a reference.
+
+    Estimates a global rigid transform (``mode="translation"`` or
+    ``"euclidean"``, i.e. translation + rotation) from each frame to a reference
+    frame with ECC and warps the frame back onto it. This cancels whole-field
+    camera motion (which otherwise adds a spurious uniform flow to every pixel and
+    swamps the subtle local pulsation) while leaving *local* tissue deformation --
+    the pulsatility itself -- intact. Frames where ECC fails to converge are kept
+    unchanged. Returns a new list; the input is not modified.
+
+    ``reference`` selects the target frame: ``"mid"`` (default, a sharp central
+    frame), ``"first"``, or ``"median"`` (robust but slightly blurred).
+    """
+    import cv2
+
+    if mode == "translation":
+        warp_mode = cv2.MOTION_TRANSLATION
+    elif mode == "euclidean":
+        warp_mode = cv2.MOTION_EUCLIDEAN
+    else:
+        raise ValueError("mode must be 'translation' or 'euclidean'")
+
+    n = len(frames)
+    h, w = frames[0].shape
+    if reference == "mid":
+        ref = frames[n // 2]
+    elif reference == "first":
+        ref = frames[0]
+    elif reference == "median":
+        ref = np.median(np.stack(frames), axis=0).astype(np.float32)
+    else:
+        raise ValueError("reference must be 'mid', 'first' or 'median'")
+
+    def _norm(a):
+        a = a.astype(np.float32)
+        m, s = a.mean(), a.std()
+        return (a - m) / (s + 1e-6)
+
+    ref_n = _norm(ref)
+    criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, max_iters, eps)
+    out: List[np.ndarray] = []
+    n_failed = 0
+    for f in frames:
+        warp = np.eye(2, 3, dtype=np.float32)
+        try:
+            _, warp = cv2.findTransformECC(ref_n, _norm(f), warp, warp_mode,
+                                           criteria, None, gauss_filt)
+            stab = cv2.warpAffine(f, warp, (w, h),
+                                  flags=cv2.INTER_LINEAR + cv2.WARP_INVERSE_MAP,
+                                  borderMode=cv2.BORDER_REPLICATE)
+        except cv2.error:
+            stab = f.copy()
+            n_failed += 1
+        out.append(stab.astype(np.float32))
+    if n_failed:
+        logger.warning("stabilization: %d/%d frames did not converge (left as-is)",
+                       n_failed, n)
+    logger.info("stabilized %d frames to '%s' reference (%s)", n, reference, mode)
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # 2. Regions of interest
 # --------------------------------------------------------------------------- #
-MAX_ROIS = 5
+MAX_ROIS = 8
 
-# distinct, colour-blind-friendly colours for up to 5 ROIs (full field is grey)
-ROI_COLORS = ["#1f6feb", "#d1242f", "#2da44e", "#bf8700", "#8250df"]
+# distinct colours for up to MAX_ROIS ROIs (full field is grey)
+ROI_COLORS = ["#1f6feb", "#d1242f", "#2da44e", "#bf8700", "#8250df",
+              "#e16f24", "#0aa5b1", "#cf222e"]
 
 
 @dataclass
@@ -540,6 +611,165 @@ def analyze_pulsatility(
 
 
 # --------------------------------------------------------------------------- #
+# 4b. Respiration <-> cardiac decomposition
+# --------------------------------------------------------------------------- #
+@dataclass
+class RespirationResult:
+    """Separation of a motion signal into breathing and cardiac pulsatility."""
+
+    fps: float
+    times: np.ndarray
+    signal: np.ndarray          # broadband input, ultra-slow drift removed
+    resp_wave: np.ndarray       # respiratory-band component (the breathing artifact)
+    cardiac_wave: np.ndarray    # cardiac-band pulsatility, still breathing-modulated
+    cardiac_deconv: np.ndarray  # cardiac pulsatility with breathing removed
+    envelope: np.ndarray        # slow (respiratory) envelope of the pulse amplitude
+    resp_hz: float
+    cardiac_hz: float
+    modulation_index: float     # depth of respiratory modulation of pulse amplitude
+    freqs: np.ndarray
+    power: np.ndarray
+
+    @property
+    def resp_bpm(self) -> float:
+        return self.resp_hz * 60.0
+
+    @property
+    def cardiac_bpm(self) -> float:
+        return self.cardiac_hz * 60.0
+
+
+def decompose_respiration(
+    signal: np.ndarray,
+    fps: float,
+    *,
+    resp_bpm: Tuple[float, float] = (6.0, 30.0),
+    cardiac_bpm: Tuple[float, float] = (40.0, 180.0),
+    cardiac_hz: Optional[float] = None,
+) -> RespirationResult:
+    """Split a tissue-motion signal into a breathing wave and cardiac pulsatility,
+    and deconvolve the respiratory modulation from the pulse.
+
+    Breathing shows up two ways in the pulsatility of perfused tissue: a slow
+    oscillation at the respiratory rate (a real change in pulse pressure), and an
+    amplitude modulation of the cardiac pulse that waxes and wanes with each
+    breath. This returns the respiratory-band component (``resp_wave``), the
+    cardiac-band pulsatility as measured (``cardiac_wave``), and the cardiac
+    pulsatility with the respiratory amplitude modulation removed
+    (``cardiac_deconv``) -- the "with" and "without breathing" views. The
+    ``modulation_index`` (std/mean of the pulse envelope over respiration) is a
+    proxy for respiratory pulse-pressure variation.
+    """
+    from scipy.signal import hilbert
+
+    sig = np.asarray(signal, dtype=float)
+    resp_lo, resp_hi = resp_bpm[0] / 60.0, resp_bpm[1] / 60.0
+    card_lo, card_hi = cardiac_bpm[0] / 60.0, cardiac_bpm[1] / 60.0
+
+    # Remove ultra-slow drift (below the breathing band) so the breathing wave is clean.
+    drift_win = int(round(fps / max(resp_lo, 1e-3) * 1.5))
+    x = sig - _moving_average(sig, drift_win)
+
+    resp_wave = _bandpass(x, fps, resp_lo, resp_hi)
+
+    freqs, power, f0, _ = _dominant_frequency(x, fps, (card_lo, card_hi))
+    if cardiac_hz:
+        f0 = cardiac_hz
+    if f0 <= 0:
+        f0 = np.mean([card_lo, card_hi])
+
+    cardiac_wave = _bandpass(x, fps, f0 * 0.7, min(f0 * 1.6, fps / 2 * 0.95))
+
+    # Instantaneous pulse amplitude, smoothed over ~one cardiac cycle to leave
+    # only the respiratory-rate modulation.
+    env = np.abs(hilbert(cardiac_wave))
+    env_slow = _moving_average(env, max(3, int(round(fps / f0))))
+    mean_env = float(np.mean(env_slow)) or 1.0
+    modulation_index = float(np.std(env_slow) / mean_env)
+
+    # Deconvolve: flatten the respiratory amplitude modulation.
+    cardiac_deconv = cardiac_wave * mean_env / (env_slow + 1e-9)
+
+    # Respiratory rate from the resp-band spectrum.
+    _, _, resp_hz, _ = _dominant_frequency(resp_wave, fps, (resp_lo, resp_hi))
+
+    return RespirationResult(
+        fps=fps, times=(np.arange(len(x)) + 0.5) / fps, signal=x,
+        resp_wave=resp_wave, cardiac_wave=cardiac_wave, cardiac_deconv=cardiac_deconv,
+        envelope=env_slow, resp_hz=resp_hz, cardiac_hz=f0,
+        modulation_index=modulation_index, freqs=freqs, power=power,
+    )
+
+
+def plot_breathing_decomposition(resp: RespirationResult, output_path, *,
+                                 title: Optional[str] = None):
+    """Figure showing the pulsatility WITH and WITHOUT the breathing artifact."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.gridspec import GridSpec
+
+    r = resp
+    fig = plt.figure(figsize=(13, 9))
+    gs = GridSpec(3, 1, figure=fig, height_ratios=[1.0, 1.0, 0.9], hspace=0.42)
+    t = r.times
+
+    # --- A: WITH breathing ------------------------------------------------ #
+    axa = fig.add_subplot(gs[0])
+    axa.plot(t, r.cardiac_wave, color="#1f6feb", lw=1.0,
+             label="cardiac pulsatility (as measured)")
+    axa.plot(t, r.envelope, color="#d1242f", lw=1.6, alpha=0.9,
+             label="pulse-amplitude envelope")
+    axa.plot(t, -r.envelope, color="#d1242f", lw=1.6, alpha=0.9)
+    axa.plot(t, r.resp_wave, color="#2da44e", lw=1.6, alpha=0.85,
+             label=f"breathing wave ({r.resp_bpm:.1f} /min)")
+    axa.axhline(0, color="k", lw=0.5, alpha=0.4)
+    axa.set_ylabel("tissue motion\n(px / frame)")
+    axa.set_title("WITH breathing — cardiac pulse amplitude is modulated by respiration",
+                  fontsize=12, weight="bold")
+    axa.set_xlim(t[0], t[-1])
+    axa.legend(loc="upper right", fontsize=8, ncol=3, framealpha=0.9)
+    axa.grid(alpha=0.2)
+
+    # --- B: WITHOUT breathing (deconvolved) ------------------------------- #
+    axb = fig.add_subplot(gs[1], sharex=axa)
+    axb.plot(t, r.cardiac_wave, color="0.75", lw=0.8, label="with breathing")
+    axb.plot(t, r.cardiac_deconv, color="#8250df", lw=1.1,
+             label="deconvolved (breathing removed)")
+    axb.axhline(0, color="k", lw=0.5, alpha=0.4)
+    axb.set_xlabel("time (s)")
+    axb.set_ylabel("tissue motion\n(px / frame)")
+    axb.set_title(f"WITHOUT breathing — respiratory modulation deconvolved "
+                  f"(cardiac {r.cardiac_bpm:.1f} ppm)", fontsize=12, weight="bold")
+    axb.legend(loc="upper right", fontsize=8, ncol=2, framealpha=0.9)
+    axb.grid(alpha=0.2)
+
+    # --- C: spectrum with both peaks -------------------------------------- #
+    axc = fig.add_subplot(gs[2])
+    m = (r.freqs > 0) & (r.freqs <= max(r.cardiac_hz * 2.5, 4.0))
+    axc.plot(r.freqs[m] * 60, r.power[m] / (r.power[m].max() or 1), color="#1f6feb", lw=1.2)
+    axc.axvline(r.resp_bpm, color="#2da44e", ls="--", lw=1.3,
+                label=f"breathing {r.resp_bpm:.1f} /min")
+    axc.axvline(r.cardiac_bpm, color="#d1242f", ls="--", lw=1.3,
+                label=f"cardiac {r.cardiac_bpm:.1f} /min")
+    axc.set_xlabel("rate (per min)")
+    axc.set_ylabel("relative power")
+    axc.set_title("Spectrum — respiratory and cardiac components "
+                  f"(respiratory modulation of pulse ≈ {r.modulation_index*100:.0f}%)",
+                  fontsize=11)
+    axc.set_xlim(0, max(r.cardiac_bpm * 2.4, 240))
+    axc.legend(fontsize=9)
+    axc.grid(alpha=0.2)
+
+    if title:
+        fig.suptitle(title, fontsize=13, weight="bold", y=0.995)
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=140, bbox_inches="tight")
+    plt.close(fig)
+    logger.info("breathing decomposition saved to %s", output_path)
+
+
+# --------------------------------------------------------------------------- #
 # 5. Plot & file outputs
 # --------------------------------------------------------------------------- #
 def plot_pulsatility(result: PulsatilityResult, output_path, *, title: Optional[str] = None):
@@ -872,6 +1102,8 @@ def analyze_pulsatility_video(
     min_bpm: float = 30.0,
     max_bpm: float = 300.0,
     pixel_size_um: Optional[float] = None,
+    stabilize: bool = False,
+    stabilize_mode: str = "euclidean",
     rois: Optional[Sequence[str]] = None,
     roi_units: str = "pixel",
     roi_mask=None,
@@ -902,6 +1134,8 @@ def analyze_pulsatility_video(
     )
     if fps_override:
         fps = fps_override
+    if stabilize:
+        frames = stabilize_frames(frames, mode=stabilize_mode)
 
     regions = build_roi_masks(
         frames[0].shape, scale=scale, rois=rois, units=roi_units,
@@ -981,6 +1215,13 @@ def cli(argv=None):
                         help="upper bound of pulse-rate search (pulses/min)")
     parser.add_argument("--pixel-size-um", type=float, default=None,
                         help="pixel size to report motion in um/s")
+    parser.add_argument("--stabilize", action="store_true",
+                        help="remove global camera/scope shake before analysis "
+                             "(recommended for hand-held / surgical video)")
+    parser.add_argument("--stabilize-mode", choices=("translation", "euclidean"),
+                        default="euclidean",
+                        help="stabilization transform: translation, or euclidean "
+                             "(translation + rotation, default)")
     parser.add_argument("--roi", action="append", dest="rois", metavar="[NAME=]X,Y,W,H",
                         help="region of interest rectangle (repeatable, up to 5). "
                              "Coordinates are original-video pixels unless "
@@ -1013,6 +1254,8 @@ def cli(argv=None):
         min_bpm=args.min_bpm,
         max_bpm=args.max_bpm,
         pixel_size_um=args.pixel_size_um,
+        stabilize=args.stabilize,
+        stabilize_mode=args.stabilize_mode,
         rois=args.rois,
         roi_units=args.roi_units,
         roi_mask=args.roi_mask,

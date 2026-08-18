@@ -20,11 +20,14 @@ from pulsatility import (
     analyze_pulsatility,
     analyze_pulsatility_video,
     build_roi_masks,
+    decompose_respiration,
     load_video_gray,
     motion_signal,
     motion_signals,
+    plot_breathing_decomposition,
     plot_pulsatility,
     plot_pulsatility_comparison,
+    stabilize_frames,
 )
 from pulsatility.pulsatility import parse_roi_spec
 
@@ -255,4 +258,72 @@ def test_plot_comparison(tmp_path):
     rb = analyze_pulsatility(fb, fps, precomputed=motion_signal(fb, method="diff"))
     out = tmp_path / "cmp.png"
     plot_pulsatility_comparison({"A": ra, "B": rb}, out, title="A vs B")
+    assert out.exists() and out.stat().st_size > 0
+
+
+# --------------------------------------------------------------------------- #
+# Stabilization
+# --------------------------------------------------------------------------- #
+def test_stabilize_reduces_global_shake():
+    """stabilize_frames removes injected global jitter (frame-to-frame motion drops)."""
+    rng = np.random.default_rng(5)
+    tex = gaussian_filter(rng.standard_normal((80, 100)).astype(np.float32), 1.5)
+    tex = (tex - tex.min()) / np.ptp(tex) * 200 + 20
+    shifts = [(1.6 * np.sin(i * 0.5), 1.3 * np.cos(i * 0.4)) for i in range(30)]
+    frames = [ndshift(tex, (dy, dx), order=1, mode="reflect") for dx, dy in shifts]
+
+    def mafd(fr):
+        return float(np.mean([np.abs(fr[i + 1] - fr[i]).mean() for i in range(len(fr) - 1)]))
+
+    before = mafd(frames)
+    stab = stabilize_frames(frames, mode="euclidean", reference="mid")
+    after = mafd(stab)
+    assert len(stab) == len(frames)
+    assert stab[0].shape == frames[0].shape
+    assert after < 0.5 * before  # most of the shake removed
+
+
+def test_build_six_rois_now_allowed():
+    """MAX_ROIS was raised past 5; six ROIs build fine."""
+    assert MAX_ROIS >= 6
+    specs = [f"r{i}=0.{i}0,0.10,0.08,0.08" for i in range(6)]
+    regions = build_roi_masks((200, 200), rois=specs, units="fraction")
+    assert len(regions) == 6
+
+
+# --------------------------------------------------------------------------- #
+# Respiration / cardiac decomposition
+# --------------------------------------------------------------------------- #
+def test_decompose_recovers_breathing_and_cardiac():
+    from scipy.signal import hilbert
+
+    fps = 25.0
+    n = int(fps * 40)
+    t = np.arange(n) / fps
+    fc, fr = 1.2, 0.2  # 72 ppm cardiac, 12 /min breathing
+    rng = np.random.default_rng(7)
+    resp = 0.3 * np.sin(2 * np.pi * fr * t)
+    am = 1.0 + 0.5 * np.sin(2 * np.pi * fr * t)   # breathing modulates pulse amplitude
+    cardiac = am * np.sin(2 * np.pi * fc * t)
+    sig = 1.0 + resp + cardiac + 0.02 * rng.standard_normal(n)
+
+    res = decompose_respiration(sig, fps, resp_bpm=(6, 30), cardiac_bpm=(40, 140))
+    assert abs(res.cardiac_bpm - 72) < 6
+    assert abs(res.resp_bpm - 12) < 4
+    assert res.modulation_index > 0.1
+    # deconvolution flattens the respiratory amplitude modulation
+    cv_before = np.std(np.abs(hilbert(res.cardiac_wave))) / np.mean(np.abs(hilbert(res.cardiac_wave)))
+    cv_after = np.std(np.abs(hilbert(res.cardiac_deconv))) / np.mean(np.abs(hilbert(res.cardiac_deconv)))
+    assert cv_after < cv_before
+
+
+def test_plot_breathing_decomposition(tmp_path):
+    fps = 25.0
+    n = int(fps * 30)
+    t = np.arange(n) / fps
+    am = 1.0 + 0.4 * np.sin(2 * np.pi * 0.2 * t)
+    sig = 1.0 + 0.3 * np.sin(2 * np.pi * 0.2 * t) + am * np.sin(2 * np.pi * 1.2 * t)
+    res = decompose_respiration(sig, fps)
+    out = tmp_path / "breathing.png"
+    plot_breathing_decomposition(res, out, title="synthetic")
     assert out.exists() and out.stat().st_size > 0
