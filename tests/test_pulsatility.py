@@ -20,11 +20,29 @@ from pulsatility import (
     analyze_pulsatility,
     analyze_pulsatility_video,
     build_roi_masks,
+    load_video_gray,
     motion_signal,
     motion_signals,
     plot_pulsatility,
+    plot_pulsatility_comparison,
 )
 from pulsatility.pulsatility import parse_roi_spec
+
+
+def _write_synthetic_mp4(path, frames, fps):
+    """Write frames to an mp4; return True on success, False if no encoder."""
+    import cv2
+
+    h, w = frames[0].shape
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"),
+                             fps, (w, h), isColor=True)
+    if not writer.isOpened():
+        return False
+    for fr in frames:
+        writer.write(cv2.cvtColor(np.clip(fr, 0, 255).astype(np.uint8),
+                                  cv2.COLOR_GRAY2BGR))
+    writer.release()
+    return path.exists() and path.stat().st_size > 0
 
 
 def _pulsing_texture_frames(fps=30.0, dur=6.0, f=1.0, seed=0):
@@ -216,3 +234,25 @@ def test_end_to_end_with_rois_writes_roi_artifacts(tmp_path):
     for name in ("pulsatility_rois.png", "pulsatility_roi_waveforms.csv",
                  "pulsatility_roi_summary.txt", "pulsatility_analysis.png"):
         assert (out / name).exists(), name
+
+
+def test_frame_stride_grab_path(tmp_path):
+    """load_video_gray with frame_stride skips-decodes and scales fps down."""
+    frames, fps = _pulsing_texture_frames(f=1.0, dur=4.0)  # 120 frames @30fps
+    video = tmp_path / "stride.mp4"
+    if not _write_synthetic_mp4(video, frames, fps):
+        pytest.skip("no MP4 encoder available")
+    got, got_fps = load_video_gray(video, resize_width=0, frame_stride=3)
+    assert abs(got_fps - fps / 3) < 1e-6
+    assert abs(len(got) - len(frames) / 3) <= 2
+
+
+def test_plot_comparison(tmp_path):
+    """plot_pulsatility_comparison renders across two videos without raising."""
+    fa, fps = _pulsing_texture_frames(f=1.0, dur=4.0)
+    fb, _ = _pulsing_texture_frames(f=1.5, dur=4.0, seed=3)
+    ra = analyze_pulsatility(fa, fps, precomputed=motion_signal(fa, method="diff"))
+    rb = analyze_pulsatility(fb, fps, precomputed=motion_signal(fb, method="diff"))
+    out = tmp_path / "cmp.png"
+    plot_pulsatility_comparison({"A": ra, "B": rb}, out, title="A vs B")
+    assert out.exists() and out.stat().st_size > 0

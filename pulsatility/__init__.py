@@ -43,6 +43,7 @@ from .pulsatility import (  # noqa: F401
     motion_signal,
     motion_signals,
     plot_pulsatility,
+    plot_pulsatility_comparison,
     plot_pulsatility_multi,
     cli,
 )
@@ -58,6 +59,7 @@ __all__ = [
     "motion_signal",
     "motion_signals",
     "plot_pulsatility",
+    "plot_pulsatility_comparison",
     "plot_pulsatility_multi",
     "cli",
 ]

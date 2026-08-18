@@ -78,21 +78,28 @@ def load_video_gray(
     idx = 0
     orig_w = None
     scale = 1.0
+    stride = max(1, int(frame_stride))
     while True:
+        # Skip strided-over frames with grab() (demux only, no decode) so large
+        # videos are not fully decoded just to be thrown away.
+        if stride > 1 and (idx % stride):
+            if not cap.grab():
+                break
+            idx += 1
+            continue
         ok, frame = cap.read()
         if not ok:
             break
-        if idx % frame_stride == 0:
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            if orig_w is None:
-                orig_w = gray.shape[1]
-            if resize_width and gray.shape[1] > resize_width:
-                sc = resize_width / gray.shape[1]
-                new_size = (resize_width, max(1, int(round(gray.shape[0] * sc))))
-                gray = cv2.resize(gray, new_size, interpolation=cv2.INTER_AREA)
-            frames.append(gray.astype(np.float32))
-            if max_frames and len(frames) >= max_frames:
-                break
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        if orig_w is None:
+            orig_w = gray.shape[1]
+        if resize_width and gray.shape[1] > resize_width:
+            sc = resize_width / gray.shape[1]
+            new_size = (resize_width, max(1, int(round(gray.shape[0] * sc))))
+            gray = cv2.resize(gray, new_size, interpolation=cv2.INTER_AREA)
+        frames.append(gray.astype(np.float32))
+        if max_frames and len(frames) >= max_frames:
+            break
         idx += 1
     cap.release()
 
@@ -743,6 +750,82 @@ def plot_pulsatility_multi(
     fig.savefig(output_path, dpi=140, bbox_inches="tight")
     plt.close(fig)
     logger.info("multi-ROI plot saved to %s", output_path)
+
+
+def plot_pulsatility_comparison(results, output_path, *, title: Optional[str] = None):
+    """Compare the pulsatility of several *videos* (each with its own frame).
+
+    ``results`` maps a label (e.g. ``"Human"``, ``"Bioreactor"``) to a
+    :class:`PulsatilityResult`. Renders overlaid pulsatility waves, overlaid
+    spectra, and a per-video "where it pulses" amplitude map annotated with that
+    video's rate / pulsatility index / SNR. Unlike :func:`plot_pulsatility_multi`
+    (one frame, many ROIs) each video keeps its own reference frame.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.gridspec import GridSpec
+
+    labels = list(results.keys())
+    n = len(labels)
+    colors = {lab: ROI_COLORS[i % len(ROI_COLORS)] for i, lab in enumerate(labels)}
+
+    fig = plt.figure(figsize=(6.2 * max(n, 2), 10))
+    gs = GridSpec(3, n, figure=fig, height_ratios=[1.1, 0.95, 1.15],
+                  hspace=0.42, wspace=0.28)
+
+    # --- Row 0: overlaid pulsatility waves -------------------------------- #
+    axw = fig.add_subplot(gs[0, :])
+    tmax = max(results[l].times[-1] for l in labels)
+    for lab in labels:
+        r = results[lab]
+        axw.plot(r.times, r.wave, color=colors[lab], lw=1.3, alpha=0.9,
+                 label=f"{lab} — {r.bpm_spectral:.0f} ppm")
+    axw.axhline(0, color="k", lw=0.5, alpha=0.4)
+    axw.set_xlim(0, tmax)
+    axw.set_xlabel("time (s)")
+    axw.set_ylabel("tissue motion\n(px / frame)")
+    axw.set_title("Pulsatility waves", fontsize=12, weight="bold")
+    axw.legend(loc="upper right", fontsize=9, ncol=n, framealpha=0.9)
+    axw.grid(alpha=0.2)
+
+    # --- Row 1: overlaid spectra ------------------------------------------ #
+    axs = fig.add_subplot(gs[1, :])
+    for lab in labels:
+        r = results[lab]
+        lo, hi = r.band_hz
+        m = (r.freqs >= max(0, lo * 0.5)) & (r.freqs <= hi * 1.4)
+        axs.plot(r.freqs[m] * 60, r.power[m] / (r.power[m].max() or 1),
+                 color=colors[lab], lw=1.4, alpha=0.9, label=lab)
+    axs.set_xlabel("rate (pulses / min)")
+    axs.set_ylabel("relative power")
+    axs.set_title("Pulsation spectra", fontsize=11)
+    axs.legend(fontsize=9)
+    axs.grid(alpha=0.2)
+
+    # --- Row 2: per-video amplitude maps + metrics ------------------------ #
+    for i, lab in enumerate(labels):
+        r = results[lab]
+        ax = fig.add_subplot(gs[2, i])
+        ax.imshow(r.reference, cmap="gray")
+        vmax = np.percentile(r.amplitude_map, 99.5) or r.amplitude_map.max() or 1.0
+        ax.imshow(r.amplitude_map, cmap="inferno", alpha=0.6, vmin=0, vmax=vmax)
+        ax.set_title(
+            f"{lab}\n{r.bpm_spectral:.1f} ppm · PI {r.pulsatility_index:.2f}\n"
+            f"ampRMS {r.amplitude_rms:.3f} · SNR {r.spectral_snr*100:.0f}%",
+            fontsize=10, color=colors[lab])
+        ax.axis("off")
+        for sp in ax.spines.values():
+            sp.set_visible(True)
+            sp.set_edgecolor(colors[lab])
+            sp.set_linewidth(2.5)
+
+    if title:
+        fig.suptitle(title, fontsize=14, weight="bold", y=0.997)
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=140, bbox_inches="tight")
+    plt.close(fig)
+    logger.info("comparison plot saved to %s", output_path)
 
 
 def _write_roi_csv(results, path):
