@@ -157,6 +157,42 @@ region-to-region contrast the multi-ROI mode is for.
 
 ![ROI comparison](results_roi/pulsatility_rois.png)
 
+## Comparing conditions & large / 4K videos
+
+To compare pulsatility **across videos** (e.g. an *in vivo* recording vs. a
+bioreactor, or gel vs. brain), analyse each and pass the results to
+`plot_pulsatility_comparison`, which overlays the waves and spectra and shows
+each video's amplitude map + metrics side by side:
+
+```python
+from pulsatility import analyze_pulsatility_video, plot_pulsatility_comparison
+
+a = analyze_pulsatility_video("Human.MOV", "out/human", rois=["cortex=0.40,0.23,0.33,0.58"],
+                              roi_units="fraction", frame_stride=2)
+b = analyze_pulsatility_video("Bioreactor.MOV", "out/bio", rois=["chamber=0.20,0.26,0.52,0.50"],
+                              roi_units="fraction", frame_stride=2)
+plot_pulsatility_comparison(
+    {"Human — cortex":     a.extras["roi_results"]["cortex"],
+     "Bioreactor — chamber": b.extras["roi_results"]["chamber"]},
+    "out/comparison.png")
+```
+
+For **large / high-frame-rate videos** (the surgical and bioreactor clips are 4K
+at 50 fps), two options keep runtime and memory in check:
+
+* `--frame-stride N` analyses every Nth frame and **skips decoding** the rest
+  (via `cv2.grab()`), so a stride of 2 roughly halves the decode cost. The
+  effective frame rate is divided by N — keep it well above twice the expected
+  pulse rate (stride 2 → 25 fps handles any cardiac rate).
+* `--max-frames M` caps the analysed window; a matched window across conditions
+  makes the comparison fair.
+
+A practical tip for oblique, real-world footage: measure inside an ROI on the
+actual parenchyma. Whole-field motion there is dominated by camera shake,
+instruments and harmonics — on the surgical clip the whole frame reports ~146
+ppm (the 2nd harmonic) while a cortex ROI recovers the true ~73 ppm cardiac
+rate.
+
 ## Metrics
 
 * **pulse rate (spectral)** — fundamental of the motion spectrum, in pulses/min.
