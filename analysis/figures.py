@@ -291,9 +291,27 @@ def _boxpair(ax, data, title, ylabel, labels=("Human\n(resp-corr.)", "Bioreactor
     ax.grid(alpha=0.15, axis="y")
 
 
-def _pool_bioreactor(bio_reps, per=48, npulses=15):
+def _cycles(sig, fps, f0, per=48):
+    """Peak-to-peak cycles resampled to `per` points each; matrix (n_cycles, per)."""
+    dist = max(1, int(round(fps / f0 * 0.6)))
+    pk, _ = find_peaks(sig, distance=dist, prominence=0.3 * np.std(sig) or None)
+    out = []
+    for i in range(len(pk) - 1):
+        seg = sig[pk[i]:pk[i + 1]]
+        if len(seg) >= 3:
+            out.append(np.interp(np.linspace(0, 1, per), np.linspace(0, 1, len(seg)), seg))
+    return np.array(out) if out else np.zeros((0, per))
+
+
+def _tiled(mean_cycle, sd_cycle, npulses):
+    """Tile a mean-cycle (+SD) into a continuous-train view of `npulses` pulses."""
+    x = np.linspace(0, npulses, len(mean_cycle) * npulses)
+    return x, np.tile(mean_cycle, npulses), np.tile(sd_cycle, npulses)
+
+
+def _pool_bioreactor(bio_reps, per=48):
     bpm_grid = np.linspace(0, 260, 400)
-    mag, pw, tw, isi, specs, trains = [], [], [], [], [], []
+    mag, pw, tw, isi, specs, cyc = [], [], [], [], [], []
     best = None; n_org = 0
     for k, rep in enumerate(bio_reps):
         R, fps = rep["results"], rep["fps"]
@@ -313,89 +331,118 @@ def _pool_bioreactor(bio_reps, per=48, npulses=15):
                 isi.append(F["isi"] / np.median(F["isi"]))
             f, p = _spectrum(sig, fps)
             specs.append(np.interp(bpm_grid, f * 60, p / (p.max() or 1), left=0, right=0))
-            peaks, _ = find_peaks(sig, distance=max(1, int(round(fps / fd * 0.6))),
-                                  prominence=0.3 * np.std(sig) or None)
-            if len(peaks) >= npulses + 1:
-                _, train = pulse_train(sig, peaks, fps, npulses=npulses, per=per)
-                trains.append(train)
+            C = _cycles(sig, fps, fd, per)
+            if len(C):
+                cyc.append(C / (np.percentile(np.abs(C), 99) or 1))   # per-unit amplitude-normalized
             snr = getattr(res, "spectral_snr", 0.0)
             if best is None or snr > best[0]:
                 best = (snr, sig, res.times[:len(sig)], fps, fd, f"Rep {k+1} {ok}")
     cat = lambda L: np.concatenate(L) if L else np.array([])
     spec_mean = np.mean(specs, axis=0) if specs else np.zeros_like(bpm_grid)
-    T = np.array(trains) if trains else np.zeros((1, per * npulses))
+    allc = np.vstack(cyc) if cyc else np.zeros((1, per))
     return dict(mag=cat(mag), pw=cat(pw), tw=cat(tw), isi=cat(isi),
                 bpm=bpm_grid, spec=spec_mean,
-                train_x=np.linspace(0, npulses, per * npulses),
-                train_mean=T.mean(0), train_sd=T.std(0),
+                cyc_mean=allc.mean(0), cyc_sd=allc.std(0), n_cyc=len(allc),
                 rep_bpm=[r["results"]["within-vessel"].dominant_hz * 60 for r in bio_reps],
                 n_org=n_org, n_rep=len(bio_reps), rep_of_best=best)
 
 
-def comparison_pooled_figure(cortex, resp, bio_reps, fps_h, out, hp_bpm=12.0):
+def _pool_human(human_reps, hp_bpm=12.0, per=48):
     from pulsatility import highpass
-    base = highpass(cortex.detrended, fps_h, hp_bpm)          # strip slow field drift
-    human_sig = resp_correct(_bandlimit(base, fps_h, cortex.dominant_hz), resp)
-    th = cortex.times[:len(human_sig)]
+    bpm_grid = np.linspace(0, 260, 400)
+    mag, pw, tw, isi, specs, cyc, rates = [], [], [], [], [], [], []
+    best = None; n_h = 0
+    for k, d in enumerate(human_reps):
+        ctx, resp, fps = d["cortex"], d["resp"], d["fps"]
+        sig = resp_correct(_bandlimit(highpass(ctx.detrended, fps, hp_bpm), fps, ctx.dominant_hz), resp)
+        F = pulse_features(sig, fps, ctx.dominant_hz)
+        if not len(F["mag"]):
+            continue
+        n_h += 1; rates.append(ctx.dominant_hz * 60)
+        mag.append(F["mag"]); pw.append(F["pw"] * 100); tw.append(F["tw"] * 100)
+        if len(F["isi"]):
+            isi.append(F["isi"] / np.median(F["isi"]))
+        f, p = _spectrum(sig, fps)
+        specs.append(np.interp(bpm_grid, f * 60, p / (p.max() or 1), left=0, right=0))
+        C = _cycles(sig, fps, ctx.dominant_hz, per)
+        if len(C):
+            cyc.append(C / (np.percentile(np.abs(C), 99) or 1))
+        snr = getattr(ctx, "spectral_snr", 0.0)
+        if best is None or snr > best[0]:
+            best = (snr, sig, ctx.times[:len(sig)], fps, ctx.dominant_hz, d.get("label", f"Human {k+1}"))
+    cat = lambda L: np.concatenate(L) if L else np.array([])
+    spec_mean = np.mean(specs, axis=0) if specs else np.zeros_like(bpm_grid)
+    allc = np.vstack(cyc) if cyc else np.zeros((1, per))
+    return dict(mag=cat(mag), pw=cat(pw), tw=cat(tw), isi=cat(isi),
+                bpm=bpm_grid, spec=spec_mean,
+                cyc_mean=allc.mean(0), cyc_sd=allc.std(0), n_cyc=len(allc),
+                rates=rates, n_h=n_h, rep_of_best=best)
+
+
+def comparison_pooled_figure(human_reps, bio_reps, out, hp_bpm=12.0):
+    """Human cortex (both replicates pooled) vs bioreactor (all replicates pooled).
+
+    human_reps: list of {label, cortex, resp, fps}.  Every waveform panel shows the
+    ensemble-averaged pulse ± SD (variability across all pooled cycles), tiled into a
+    continuous-train view; both sides are pooled."""
+    H = _pool_human(human_reps, hp_bpm)
     P = _pool_bioreactor(bio_reps)
-    _, rep_sig, rep_t, rep_fps, rep_f0, rep_lbl = P["rep_of_best"]
-    med_bpm = float(np.median(P["rep_bpm"]))
+    NP = 6                                          # pulses in the tiled-train view
+    xh, hm, hs = _tiled(H["cyc_mean"], H["cyc_sd"], NP)
+    xb, bm, bs = _tiled(P["cyc_mean"], P["cyc_sd"], NP)
+    hbpm = float(np.median(H["rates"])); bbpm = float(np.median(P["rep_bpm"]))
+    hlab = f"Human pooled ({H['n_h']} reps, {H['n_cyc']} cycles, {hbpm:.0f} bpm)"
+    blab = f"Bioreactor pooled ({P['n_org']} organoids, {P['n_cyc']} cycles, {bbpm:.0f} bpm)"
 
     fig = plt.figure(figsize=(10, 15.5))
     gs = GridSpec(4, 2, figure=fig, height_ratios=[1.0, 1.0, 1.15, 1.2],
                   width_ratios=[2.2, 1.2], hspace=0.5, wspace=0.28, top=0.9, bottom=0.05)
 
-    NP = 20  # pulses to show on the rate-matched axis
-    axw = fig.add_subplot(gs[0, 0])
-    axw.plot(_rate_match(th, cortex.dominant_hz), human_sig, color=BLUE, lw=1.0)
-    axw.axhline(0, color="k", lw=0.4, alpha=0.4)
-    axw.set_xlim(0, NP); axw.set_ylabel("Human — cortex\n(resp-corr., HP)\n(px/frame)", fontsize=10)
-    axw.set_title("Pulsatility waveforms (rate-matched to 60 bpm)"); axw.set_xticklabels([])
-    axs = fig.add_subplot(gs[0, 1])
-    f, p = _spectrum(human_sig, fps_h); m = (f * 60 >= 0) & (f * 60 <= 260)
-    axs.plot(f[m] * 60, p[m] / (p[m].max() or 1), color=BLUE, lw=1.2)
-    axs.axvline(cortex.dominant_hz * 60, color="k", ls="--", lw=0.8, alpha=0.55)
-    axs.text(0.95, 0.82, f"{cortex.dominant_hz*60:.0f} bpm", transform=axs.transAxes, ha="right", color=BLUE)
-    axs.set_xlim(0, 260); axs.set_yticks([]); axs.set_title("Rate spectra"); axs.set_xticklabels([])
+    def _wave(ax, x, mean, sd, color, ylabel, title, xlabel=None):
+        ax.fill_between(x, mean - sd, mean + sd, color=color, alpha=0.20, lw=0)
+        ax.plot(x, mean, color=color, lw=1.9)
+        ax.axhline(0, color="k", lw=0.4, alpha=0.4)
+        ax.set_xlim(0, NP); ax.set_xticks(range(NP + 1))
+        ax.set_ylabel(ylabel, fontsize=10); ax.set_title(title, fontsize=11.5)
+        ax.set_xlabel(xlabel) if xlabel else ax.set_xticklabels([])
 
-    axw2 = fig.add_subplot(gs[1, 0])
-    axw2.plot(_rate_match(rep_t, rep_f0), rep_sig, color=RED, lw=1.0)
-    axw2.axhline(0, color="k", lw=0.4, alpha=0.4)
-    axw2.set_xlim(0, NP)
-    axw2.set_ylabel(f"Bioreactor organoid\n(rep. ex.: {rep_lbl})\n(px/frame)", fontsize=9.5)
-    axw2.set_xlabel("Rate-matched time (pulses, 60 bpm reference)")
-    axs2 = fig.add_subplot(gs[1, 1])
-    axs2.plot(P["bpm"], P["spec"] / (P["spec"].max() or 1), color=RED, lw=1.4)
-    axs2.axvline(med_bpm, color="k", ls="--", lw=0.8, alpha=0.55)
-    axs2.text(0.95, 0.82, f"{med_bpm:.0f} bpm", transform=axs2.transAxes, ha="right", color=RED)
-    axs2.set_xlim(0, 260); axs2.set_yticks([]); axs2.set_xlabel("Rate (bpm)")
-    axs2.set_title(f"Pooled spectrum\n({P['n_org']} organoids)", fontsize=10)
+    def _spec(ax, pool, color, bpm, title, xlabel=False):
+        ax.plot(pool["bpm"], pool["spec"] / (pool["spec"].max() or 1), color=color, lw=1.4)
+        ax.axvline(bpm, color="k", ls="--", lw=0.8, alpha=0.55)
+        ax.text(0.95, 0.82, f"{bpm:.0f} bpm", transform=ax.transAxes, ha="right", color=color)
+        ax.set_xlim(0, 260); ax.set_yticks([]); ax.set_title(title, fontsize=10)
+        ax.set_xlabel("Rate (bpm)") if xlabel else ax.set_xticklabels([])
 
+    # rows 0/1: each condition's ensemble pulse ± SD (left) + pooled spectrum (right)
+    _wave(fig.add_subplot(gs[0, 0]), xh, hm, hs, BLUE,
+          "Human cortex\n(norm. motion)", "Ensemble-averaged pulse ± SD (rate-standardized)")
+    _spec(fig.add_subplot(gs[0, 1]), H, BLUE, hbpm, f"Human pooled spectrum\n({H['n_h']} reps)")
+    _wave(fig.add_subplot(gs[1, 0]), xb, bm, bs, RED,
+          "Bioreactor organoid\n(norm. motion)", "",
+          xlabel="Pulse number (rate-standardized)")
+    _spec(fig.add_subplot(gs[1, 1]), P, RED, bbpm, f"Bioreactor pooled spectrum\n({P['n_org']} organoids)", xlabel=True)
+
+    # row 2: overlay both ensemble pulses ± SD
     axtr = fig.add_subplot(gs[2, :])
-    peaks_h, _ = find_peaks(human_sig, distance=max(1, int(round(fps_h / cortex.dominant_hz * 0.6))),
-                            prominence=0.3 * np.std(human_sig) or None)
-    xh, trh = pulse_train(human_sig, peaks_h, fps_h, npulses=15)
-    axtr.plot(xh, trh, color=BLUE, lw=1.6, label=f"Human cortex (resp-corr.) ({cortex.dominant_hz*60:.0f} bpm)")
-    axtr.fill_between(P["train_x"], P["train_mean"] - P["train_sd"], P["train_mean"] + P["train_sd"],
-                      color=RED, alpha=0.18, lw=0)
-    axtr.plot(P["train_x"], P["train_mean"], color=RED, lw=1.8,
-              label=f"Bioreactor pooled mean ± SD ({med_bpm:.0f} bpm, {P['n_org']} organoids)")
+    axtr.fill_between(xh, hm - hs, hm + hs, color=BLUE, alpha=0.16, lw=0)
+    axtr.plot(xh, hm, color=BLUE, lw=1.9, label=hlab)
+    axtr.fill_between(xb, bm - bs, bm + bs, color=RED, alpha=0.16, lw=0)
+    axtr.plot(xb, bm, color=RED, lw=1.9, label=blab)
     axtr.axhline(0, color="k", lw=0.4, alpha=0.4)
-    axtr.set_xlim(0, 15); axtr.set_xticks(range(0, 16))
+    axtr.set_xlim(0, NP); axtr.set_xticks(range(NP + 1))
     axtr.set_xlabel("Pulse number (rate-standardized)"); axtr.set_ylabel("Normalized motion")
-    axtr.set_title("Continuous train of the first 15 pulses (rate-standardized)")
-    _headroom_legend(axtr, ncol=1, frac=0.32)
+    axtr.set_title("Ensemble pulse ± SD — human vs bioreactor (both pooled)")
+    _headroom_legend(axtr, ncol=1, frac=0.34)
 
-    fh = pulse_features(human_sig, fps_h, cortex.dominant_hz)
-    lbls = ("Human\n(resp-corr.)", f"Bioreactor\n({P['n_rep']} reps)")
+    # row 3: pooled box plots
+    lbls = (f"Human\n({H['n_h']} reps)", f"Bioreactor\n({P['n_rep']} reps)")
     box = gs[3, :].subgridspec(1, 4, wspace=0.55)
-    _boxpair(fig.add_subplot(box[0]), [fh["mag"], P["mag"]], "Pulsatility magnitude", "px/frame", lbls)
-    _boxpair(fig.add_subplot(box[1]), [fh["pw"] * 100, P["pw"]], "Pulse FWHM", "% of cycle", lbls)
-    _boxpair(fig.add_subplot(box[2]), [fh["tw"] * 100, P["tw"]], "Trough FWHM", "% of cycle", lbls)
-    isi_h = fh["isi"] / np.median(fh["isi"]) if len(fh["isi"]) else fh["isi"]
-    _boxpair(fig.add_subplot(box[3]), [isi_h, P["isi"]], "Inter-spike interval", "× median cycle", lbls)
+    _boxpair(fig.add_subplot(box[0]), [H["mag"], P["mag"]], "Pulsatility magnitude", "px/frame", lbls)
+    _boxpair(fig.add_subplot(box[1]), [H["pw"], P["pw"]], "Pulse FWHM", "% of cycle", lbls)
+    _boxpair(fig.add_subplot(box[2]), [H["tw"], P["tw"]], "Trough FWHM", "% of cycle", lbls)
+    _boxpair(fig.add_subplot(box[3]), [H["isi"], P["isi"]], "Inter-spike interval", "× median cycle", lbls)
 
-    fig.suptitle(f"Pulsatility: human cortex (resp-corrected, slow-drift removed) vs bioreactor "
+    fig.suptitle(f"Pulsatility: human cortex ({H['n_h']} replicates pooled) vs bioreactor "
                  f"({P['n_rep']} replicates pooled, {P['n_org']} organoids)", y=0.955, fontsize=13)
     _save(fig, out)
 
@@ -420,7 +467,7 @@ def human_replicate_figure(reps, out):
                          color=d.get("color"), roi=d.get("roi_frac"), F=F))
     cols = [BLUE, RED, GREEN, PURPLE][:len(prep)]
     n = len(prep)
-    NP = 18                                        # pulses shown on the rate-matched axis
+    NP = 6                                          # pulses in the tiled ensemble-train view
 
     # rows: [ROI + spectrum] , one row per replicate trace, [box plots]
     fig = plt.figure(figsize=(13, 4.2 + 2.0 * n + 3.2))
@@ -444,19 +491,25 @@ def human_replicate_figure(reps, out):
     axs.set_xlim(0, 200); axs.set_yticks([]); axs.set_xlabel("Rate (bpm)")
     axs.set_title("Cardiac rate spectrum", fontsize=12); axs.legend(fontsize=8.5)
 
-    # rows 1..n: each replicate's cardiac waveform in its OWN plot, rate-matched to 60 bpm
-    ymax = max(float(np.percentile(np.abs(P["sig"]), 99.5)) or 1 for P in prep)
+    # rows 1..n: each replicate's ensemble-averaged pulse +/- SD in its OWN plot
+    # (px/frame, so amplitude differences between patients stay visible; rate-matched
+    # by showing the average cycle tiled into a continuous train)
+    for P in prep:
+        C = _cycles(P["sig"], P["fps"], P["ctx"].dominant_hz)
+        P["cm"], P["cs"] = (C.mean(0), C.std(0)) if len(C) else (np.zeros(48), np.zeros(48))
+    ymax = max(float(np.max(np.abs(P["cm"]) + P["cs"])) or 1 for P in prep) * 1.1
     for i, (P, c) in enumerate(zip(prep, cols)):
         ax = fig.add_subplot(gs[1 + i, :])
-        xm = _rate_match(P["ctx"].times[:len(P["sig"])], P["ctx"].dominant_hz)
-        ax.plot(xm, P["sig"], color=c, lw=1.1)
+        xt, mm, ss = _tiled(P["cm"], P["cs"], NP)
+        ax.fill_between(xt, mm - ss, mm + ss, color=c, alpha=0.20, lw=0)
+        ax.plot(xt, mm, color=c, lw=1.6)
         ax.axhline(0, color="k", lw=0.4, alpha=0.4)
-        ax.set_xlim(0, NP); ax.set_ylim(-ymax, ymax)
+        ax.set_xlim(0, NP); ax.set_ylim(-ymax, ymax); ax.set_xticks(range(NP + 1))
         ax.set_ylabel(f"{P['lab']}\n(px/frame)", fontsize=10.5)
-        ax.set_title(f"{P['lab']} — cardiac waveform, rate-matched to 60 bpm "
-                     f"(true rate {P['ctx'].dominant_hz*60:.0f} bpm)", fontsize=11)
+        ax.set_title(f"{P['lab']} — ensemble-averaged pulse ± SD "
+                     f"(rate-standardized; true rate {P['ctx'].dominant_hz*60:.0f} bpm)", fontsize=11)
         if i == n - 1:
-            ax.set_xlabel("Rate-matched time (pulses, 60 bpm reference)")
+            ax.set_xlabel("Pulse number (rate-standardized)")
         else:
             ax.set_xticklabels([])
 

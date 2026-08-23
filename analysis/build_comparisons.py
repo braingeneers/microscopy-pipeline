@@ -31,9 +31,10 @@ def main():
         OUT / "ReplicateComparison3")
 
     figures.comparison_pooled_figure(
-        h1["cortex"], h1["resp"],
+        [dict(label="Human 1", cortex=h1["cortex"], resp=h1["resp"], fps=h1["fps"]),
+         dict(label="Human 2", cortex=h2["cortex"], resp=h2["resp"], fps=h2["fps"])],
         [dict(results=b["results"], fps=b["fps"]) for b in (b1, b2, b3)],
-        h1["fps"], OUT / "comparison_pooled")
+        OUT / "comparison_pooled")
 
     figures.human_replicate_figure(
         [dict(label="Human 1", cortex=h1["cortex"], resp=h1["resp"], fps=h1["fps"],
