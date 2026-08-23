@@ -21,6 +21,8 @@ from pulsatility import (
     analyze_pulsatility_video,
     build_roi_masks,
     decompose_respiration,
+    highpass,
+    regress_out_reference,
     load_video_gray,
     motion_signal,
     motion_signals,
@@ -327,3 +329,55 @@ def test_plot_breathing_decomposition(tmp_path):
     out = tmp_path / "breathing.png"
     plot_breathing_decomposition(res, out, title="synthetic")
     assert out.exists() and out.stat().st_size > 0
+
+
+def test_highpass_removes_slow_keeps_fast():
+    """A slow drift + fast pulse: high-pass must kill the slow part, keep the fast."""
+    fps = 25.0
+    n = int(fps * 60)
+    t = np.arange(n) / fps
+    slow = 1.0 * np.sin(2 * np.pi * (3 / 60) * t)   # 3 bpm slow oscillation
+    fast = 0.2 * np.sin(2 * np.pi * (90 / 60) * t)  # 90 bpm pulse
+    out = highpass(slow + fast, fps, cutoff_bpm=12.0)
+    # slow component nearly gone, fast component preserved (amp ~0.2, std ~0.141)
+    assert np.std(out) < 0.5 * np.std(slow + fast)
+    assert abs(np.std(out) - np.std(fast)) < 0.05
+    # correlation with the pure fast signal is high
+    assert np.corrcoef(out, fast)[0, 1] > 0.9
+
+
+def test_regress_out_reference_removes_shared_component():
+    fps = 25.0
+    n = int(fps * 40)
+    t = np.arange(n) / fps
+    ref = np.sin(2 * np.pi * 0.1 * t)               # shared nuisance
+    unique = 0.3 * np.sin(2 * np.pi * 1.3 * t)      # signal of interest
+    sig = 0.8 * ref + unique + 2.0                  # 0.8x the reference + offset
+    resid, beta = regress_out_reference(sig, ref)
+    assert abs(beta - 0.8) < 0.05
+    # the shared component is gone: residual correlates with `unique`, not `ref`
+    assert abs(np.corrcoef(resid, ref)[0, 1]) < 0.1
+    assert np.corrcoef(resid, unique)[0, 1] > 0.95
+
+
+def test_regress_out_reference_constant_ref_is_noop():
+    sig = np.array([1.0, 2.0, 3.0, 4.0])
+    resid, beta = regress_out_reference(sig, np.ones_like(sig))
+    assert beta == 0.0
+    assert np.allclose(resid, sig)
+
+
+def test_analyze_pulsatility_reference_signal_suppresses_shared_drift():
+    """Passing reference_signal should regress a shared nuisance out of the raw."""
+    fps = 25.0
+    n = int(fps * 40)
+    t = np.arange(n) / fps
+    drift = 0.5 * np.sin(2 * np.pi * 0.08 * t)
+    pulse = 0.15 * np.sin(2 * np.pi * 1.5 * t) + 1.0
+    raw = pulse + drift
+    amap = np.zeros((4, 4), dtype=float)
+    ref = np.zeros((4, 4), dtype=float)
+    res = analyze_pulsatility([], fps, precomputed=(raw, amap, ref),
+                              reference_signal=drift, min_bpm=40, max_bpm=200)
+    # cardiac rate still recovered (~90 bpm) and the drift is largely removed from raw
+    assert abs(res.bpm_spectral - 90) < 8

@@ -41,6 +41,7 @@ from .pulsatility import (  # noqa: F401
     analyze_pulsatility_video,
     build_roi_masks,
     decompose_respiration,
+    highpass,
     load_video_gray,
     motion_signal,
     motion_signals,
@@ -48,6 +49,7 @@ from .pulsatility import (  # noqa: F401
     plot_pulsatility,
     plot_pulsatility_comparison,
     plot_pulsatility_multi,
+    regress_out_reference,
     stabilize_frames,
     cli,
 )
@@ -61,6 +63,7 @@ __all__ = [
     "analyze_pulsatility_video",
     "build_roi_masks",
     "decompose_respiration",
+    "highpass",
     "load_video_gray",
     "motion_signal",
     "motion_signals",
@@ -68,6 +71,7 @@ __all__ = [
     "plot_pulsatility",
     "plot_pulsatility_comparison",
     "plot_pulsatility_multi",
+    "regress_out_reference",
     "stabilize_frames",
     "cli",
 ]

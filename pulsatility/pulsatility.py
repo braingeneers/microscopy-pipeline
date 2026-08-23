@@ -511,6 +511,54 @@ def _bandpass(sig: np.ndarray, fps: float, lo: float, hi: float) -> np.ndarray:
         return sig - sig.mean()
 
 
+def highpass(signal: np.ndarray, fps: float, cutoff_bpm: float = 12.0) -> np.ndarray:
+    """Zero-phase high-pass that removes oscillations slower than ``cutoff_bpm``.
+
+    Useful for stripping slow field / optical drift (bulk scene motion, illumination
+    "breathing") that survives rigid stabilization, before quantifying the much
+    faster cardiac / perfusion pulse. Returns a mean-removed, high-passed copy;
+    falls back to plain mean-removal when the signal is too short to filter.
+    """
+    from scipy.signal import butter, filtfilt
+
+    sig = np.asarray(signal, dtype=float)
+    nyq = fps / 2.0
+    wn = (cutoff_bpm / 60.0) / nyq
+    if not (0.0 < wn < 1.0):
+        return sig - sig.mean()
+    try:
+        b, a = butter(2, wn, btype="high")
+        pad = 3 * max(len(a), len(b))
+        if len(sig) <= pad:
+            return sig - sig.mean()
+        return filtfilt(b, a, sig)
+    except ValueError:
+        return sig - sig.mean()
+
+
+def regress_out_reference(
+    signal: np.ndarray, reference: np.ndarray
+) -> Tuple[np.ndarray, float]:
+    """Least-squares remove a shared *reference* motion from ``signal``.
+
+    Fits ``signal ~ beta * reference`` and returns ``(residual, beta)`` with
+    ``residual = signal - beta * (reference - mean)``. Use it to subtract a global
+    nuisance trace -- e.g. an off-tissue background / "drape" ROI, or a vibrating rig
+    housing -- that contaminates the ROI of interest. Inputs are truncated to a common
+    length; a constant (zero-energy) reference is a no-op.
+    """
+    sig = np.asarray(signal, dtype=float)
+    ref = np.asarray(reference, dtype=float)
+    n = min(len(sig), len(ref))
+    sig, ref = sig[:n], ref[:n]
+    rc = ref - ref.mean()
+    denom = float(np.dot(rc, rc))
+    if denom <= 0:
+        return sig.copy(), 0.0
+    beta = float(np.dot(rc, sig - sig.mean()) / denom)
+    return sig - beta * rc, beta
+
+
 def analyze_pulsatility(
     frames: Sequence[np.ndarray],
     fps: float,
@@ -519,6 +567,7 @@ def analyze_pulsatility(
     min_bpm: float = 30.0,
     max_bpm: float = 300.0,
     pixel_size_um: Optional[float] = None,
+    reference_signal: Optional[np.ndarray] = None,
     precomputed: Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]] = None,
 ) -> PulsatilityResult:
     """Turn a list of grayscale frames into a :class:`PulsatilityResult`.
@@ -527,6 +576,11 @@ def analyze_pulsatility(
     30-300 pulses/min covers physiological heart rates and typical perfusion-pump
     rates). Pass ``precomputed=(signal, amplitude_map, reference)`` to reuse a
     motion signal already computed by :func:`motion_signal`.
+
+    ``reference_signal`` -- an optional nuisance motion trace (e.g. an off-tissue
+    background ROI or a vibrating rig housing) that is regressed out of the raw
+    motion via :func:`regress_out_reference` before detrending, to suppress global
+    field drift / shared vibration.
     """
     from scipy.signal import find_peaks
 
@@ -535,6 +589,9 @@ def analyze_pulsatility(
         raw, amplitude_map, reference = precomputed
     else:
         raw, amplitude_map, reference = motion_signal(frames, method=method)
+
+    if reference_signal is not None:
+        raw = regress_out_reference(raw, reference_signal)[0]
 
     m = len(raw)
     times = (np.arange(m) + 0.5) / fps
