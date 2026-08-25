@@ -62,11 +62,19 @@ def pulse_features(sig, fps, f0):
     spc = fps / f0                                   # samples per cycle
     pk, _ = find_peaks(sig, distance=dist, prominence=prom)
     tr, _ = find_peaks(-sig, distance=dist, prominence=prom)
-    out = dict(mag=np.array([]), pw=np.array([]), tw=np.array([]), isi=np.array([]))
+    out = dict(mag=np.array([]), pw=np.array([]), tw=np.array([]), isi=np.array([]),
+               ta=np.array([]), tb=np.array([]))
     if len(pk) >= 2:
         out["mag"] = peak_prominences(sig, pk)[0]
         out["pw"] = peak_widths(sig, pk, rel_height=0.5)[0] / spc
         out["isi"] = np.diff(pk) / fps
+        # shape-robust duty cycle: threshold at (median trough + 1 SD); per cycle,
+        # fraction of time above (pulse phase) vs at/below (trough phase).
+        base = float(np.median(sig[tr])) if len(tr) else float(np.median(sig))
+        thr = base + sd
+        ta = np.array([100.0 * np.mean(sig[pk[i]:pk[i + 1]] > thr)
+                       for i in range(len(pk) - 1) if pk[i + 1] - pk[i] >= 2])
+        out["ta"] = ta; out["tb"] = 100.0 - ta
     if len(tr) >= 1:
         out["tw"] = peak_widths(-sig, tr, rel_height=0.5)[0] / spc
     return out
@@ -311,7 +319,7 @@ def _tiled(mean_cycle, sd_cycle, npulses):
 
 def _pool_bioreactor(bio_reps, per=48):
     bpm_grid = np.linspace(0, 260, 400)
-    mag, pw, tw, isi, specs, cyc = [], [], [], [], [], []
+    mag, pw, tw, isi, ta, tb, specs, cyc = [], [], [], [], [], [], [], []
     best = None; n_org = 0
     for k, rep in enumerate(bio_reps):
         R, fps = rep["results"], rep["fps"]
@@ -327,6 +335,7 @@ def _pool_bioreactor(bio_reps, per=48):
                 continue
             n_org += 1
             mag.append(F["mag"]); pw.append(F["pw"] * 100); tw.append(F["tw"] * 100)
+            ta.append(F["ta"]); tb.append(F["tb"])
             if len(F["isi"]):
                 isi.append(F["isi"] / np.median(F["isi"]))
             f, p = _spectrum(sig, fps)
@@ -340,7 +349,7 @@ def _pool_bioreactor(bio_reps, per=48):
     cat = lambda L: np.concatenate(L) if L else np.array([])
     spec_mean = np.mean(specs, axis=0) if specs else np.zeros_like(bpm_grid)
     allc = np.vstack(cyc) if cyc else np.zeros((1, per))
-    return dict(mag=cat(mag), pw=cat(pw), tw=cat(tw), isi=cat(isi),
+    return dict(mag=cat(mag), pw=cat(pw), tw=cat(tw), isi=cat(isi), ta=cat(ta), tb=cat(tb),
                 bpm=bpm_grid, spec=spec_mean,
                 cyc_mean=allc.mean(0), cyc_sd=allc.std(0), n_cyc=len(allc),
                 rep_bpm=[r["results"]["within-vessel"].dominant_hz * 60 for r in bio_reps],
@@ -350,7 +359,7 @@ def _pool_bioreactor(bio_reps, per=48):
 def _pool_human(human_reps, hp_bpm=12.0, per=48):
     from pulsatility import highpass
     bpm_grid = np.linspace(0, 260, 400)
-    mag, pw, tw, isi, specs, cyc, rates = [], [], [], [], [], [], []
+    mag, pw, tw, isi, ta, tb, specs, cyc, rates = [], [], [], [], [], [], [], [], []
     best = None; n_h = 0
     for k, d in enumerate(human_reps):
         ctx, resp, fps = d["cortex"], d["resp"], d["fps"]
@@ -360,6 +369,7 @@ def _pool_human(human_reps, hp_bpm=12.0, per=48):
             continue
         n_h += 1; rates.append(ctx.dominant_hz * 60)
         mag.append(F["mag"]); pw.append(F["pw"] * 100); tw.append(F["tw"] * 100)
+        ta.append(F["ta"]); tb.append(F["tb"])
         if len(F["isi"]):
             isi.append(F["isi"] / np.median(F["isi"]))
         f, p = _spectrum(sig, fps)
@@ -373,7 +383,7 @@ def _pool_human(human_reps, hp_bpm=12.0, per=48):
     cat = lambda L: np.concatenate(L) if L else np.array([])
     spec_mean = np.mean(specs, axis=0) if specs else np.zeros_like(bpm_grid)
     allc = np.vstack(cyc) if cyc else np.zeros((1, per))
-    return dict(mag=cat(mag), pw=cat(pw), tw=cat(tw), isi=cat(isi),
+    return dict(mag=cat(mag), pw=cat(pw), tw=cat(tw), isi=cat(isi), ta=cat(ta), tb=cat(tb),
                 bpm=bpm_grid, spec=spec_mean,
                 cyc_mean=allc.mean(0), cyc_sd=allc.std(0), n_cyc=len(allc),
                 rates=rates, n_h=n_h, rep_of_best=best)
@@ -438,8 +448,10 @@ def comparison_pooled_figure(human_reps, bio_reps, out, hp_bpm=12.0):
     lbls = (f"Human\n({H['n_h']} reps)", f"Bioreactor\n({P['n_rep']} reps)")
     box = gs[3, :].subgridspec(1, 4, wspace=0.55)
     _boxpair(fig.add_subplot(box[0]), [H["mag"], P["mag"]], "Pulsatility magnitude", "px/frame", lbls)
-    _boxpair(fig.add_subplot(box[1]), [H["pw"], P["pw"]], "Pulse FWHM", "% of cycle", lbls)
-    _boxpair(fig.add_subplot(box[2]), [H["tw"], P["tw"]], "Trough FWHM", "% of cycle", lbls)
+    _boxpair(fig.add_subplot(box[1]), [H["ta"], P["ta"]],
+             "Time above\n(med. trough + 1 SD)", "% of cycle", lbls)
+    _boxpair(fig.add_subplot(box[2]), [H["tb"], P["tb"]],
+             "Time below\n(med. trough + 1 SD)", "% of cycle", lbls)
     _boxpair(fig.add_subplot(box[3]), [H["isi"], P["isi"]], "Inter-spike interval", "× median cycle", lbls)
 
     fig.suptitle(f"Pulsatility: human cortex ({H['n_h']} replicates pooled) vs bioreactor "
@@ -524,8 +536,10 @@ def human_replicate_figure(reps, out):
             med.set_color("k")
         ax.set_xticklabels(labs, fontsize=10); ax.set_title(title, fontsize=12)
         ax.set_ylabel(ylabel, fontsize=11); ax.grid(alpha=0.15, axis="y")
-    boxN(fig.add_subplot(gs[1 + n, 0]), [P["F"]["pw"] * 100 for P in prep], "Pulse FWHM", "% of cycle")
-    boxN(fig.add_subplot(gs[1 + n, 1]), [P["F"]["tw"] * 100 for P in prep], "Trough FWHM", "% of cycle")
+    boxN(fig.add_subplot(gs[1 + n, 0]), [P["F"]["ta"] for P in prep],
+         "Time above\n(med. trough + 1 SD)", "% of cycle")
+    boxN(fig.add_subplot(gs[1 + n, 1]), [P["F"]["tb"] for P in prep],
+         "Time below\n(med. trough + 1 SD)", "% of cycle")
     boxN(fig.add_subplot(gs[1 + n, 2]),
          [(P["F"]["isi"] / np.median(P["F"]["isi"]) if len(P["F"]["isi"]) else P["F"]["isi"]) for P in prep],
          "Inter-spike interval", "× median cycle")
