@@ -31,7 +31,9 @@ def _spectrum(sig, fps):
     return f, p
 
 
-def _bandlimit(sig, fps, f0, lo_mult=0.5, hi_mult=3.5):
+def _bandlimit(sig, fps, f0, lo_mult=0.5, hi_mult=8.0):   # keep ~8 harmonics: the human
+    # tissue-speed pulse is harmonically rich (3rd harmonic is the largest, reproducible
+    # to >=8th); a 3.5x cutoff discards ~30% of its power and over-smooths the shape.
     nyq = fps / 2.0
     lo = max(f0 * lo_mult, 0.05) / nyq
     hi = min(f0 * hi_mult, nyq * 0.95) / nyq
