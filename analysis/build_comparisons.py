@@ -42,7 +42,15 @@ def main():
          dict(label="Human 2", cortex=h2["cortex"], resp=h2["resp"], fps=h2["fps"],
               color=h2["color"], roi_frac=h2["roi_frac"])],
         OUT / "Human_replicate_comparison")
-    print("built ReplicateComparison3, comparison_pooled, Human_replicate_comparison (png+pdf)")
+
+    # biologically-rooted assessment vs a parenchymal-pressure template + straw men
+    figures.biological_comparison_figure(
+        [dict(label="Human 1", cortex=h1["cortex"], resp=h1["resp"], fps=h1["fps"]),
+         dict(label="Human 2", cortex=h2["cortex"], resp=h2["resp"], fps=h2["fps"])],
+        [dict(results=b["results"], fps=b["fps"]) for b in (b1, b2, b3)],
+        OUT / "biological_comparison")
+    print("built ReplicateComparison3, comparison_pooled, Human_replicate_comparison, "
+          "biological_comparison (png+pdf)")
 
 
 if __name__ == "__main__":
