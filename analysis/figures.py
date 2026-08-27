@@ -727,3 +727,117 @@ def biological_comparison_figure(human_reps, bio_reps, out):
     fig.suptitle("Biologically-rooted waveform assessment — parenchymal pulse vs sine / flat straw men",
                  y=0.955, fontsize=14.5)
     _save(fig, out)
+
+
+# --------------------------------------------------------------------------- #
+# Human-as-gold-standard assessment
+#   The real human cortex pulse is the reference; the bioreactor model and the
+#   straw men (rate-matched sine, flat flow) are scored by how close they get to
+#   it. Human self-consistency (cycle vs mean) is the achievable ceiling.
+# --------------------------------------------------------------------------- #
+def _norm_cycles(sigs, per=120):
+    cs = []
+    for sig, fps, f0 in sigs:
+        C = _cycles(sig, fps, f0, per=per)
+        for c in C:
+            c = c - c.mean()
+            cs.append(c / (np.percentile(np.abs(c), 99) or 1))
+    return np.array(cs) if cs else np.zeros((0, per))
+
+
+def gold_standard_core(human_sigs, bio_sigs, out, space_label="tissue speed", icp=None):
+    """human_sigs, bio_sigs: lists of (signal, fps, f0). `icp` optional template dict
+    (from pressure_templates) drawn as a literature check on the human gold pulse."""
+    per = 120; tau = np.linspace(0, 1, per, endpoint=False)
+    HC, BC = _norm_cycles(human_sigs, per), _norm_cycles(bio_sigs, per)
+    gold = HC.mean(0); gold = gold - gold.mean()
+    gsd = HC.std(0)
+    Hself = np.array([_match_R2(c, gold) for c in HC])
+    Bcl = np.array([_match_R2(c, gold) for c in BC])
+    sineR2 = _match_R2(np.sin(2 * np.pi * tau), gold)
+    ceil, model = float(np.median(Hself)), float(np.median(Bcl))
+    pct = 100 * model / ceil if ceil else float("nan")
+    bmean = _align_norm(BC.mean(0), gold)
+    gN = gold / (np.max(np.abs(gold)) or 1); gsdN = gsd / (np.max(np.abs(gold)) or 1)
+    sineN = np.roll(np.sin(2 * np.pi * tau), int(np.argmax(gold)))  # phase to gold peak
+
+    fig = plt.figure(figsize=(12, 11))
+    gs = GridSpec(2, 2, figure=fig, height_ratios=[1.0, 0.95], hspace=0.42, wspace=0.24,
+                  top=0.9, bottom=0.08)
+
+    # A: gold pulse + bioreactor + sine overlay
+    axA = fig.add_subplot(gs[0, 0])
+    axA.fill_between(tau, gN - gsdN, gN + gsdN, color=BLUE, alpha=0.18, lw=0)
+    axA.plot(tau, gN, color=BLUE, lw=2.6, label="Human cortex — GOLD STANDARD (± SD)")
+    axA.plot(tau, bmean, color=RED, lw=1.9, label="Bioreactor (model)")
+    axA.plot(tau, sineN, color="0.5", lw=1.5, ls="--", label="Sine straw man")
+    axA.axhline(0, color="k", lw=0.4, alpha=0.4); axA.set_xlim(0, 1); axA.set_yticks([])
+    short_space = space_label.split(" (")[0]
+    axA.set_xlabel("Cardiac cycle phase"); axA.set_title(f"Gold-standard pulse — {short_space}")
+    axA.legend(fontsize=8.5, loc="upper right")
+
+    # B: optional literature check (human gold vs ICP-derived template)
+    axB = fig.add_subplot(gs[0, 1])
+    if icp is not None:
+        ref = icp.get("M_phys") if "speed" in space_label else icp.get("P_phys")
+        refN = _align_norm(ref, gold)
+        r2 = _match_R2(gold, ref)
+        axB.plot(tau, gN, color=BLUE, lw=2.2, label="Human gold")
+        axB.plot(tau, refN, color="#8a4b08", lw=1.8, ls="--",
+                 label=f"Literature parenchymal (R²={r2:.2f})")
+        axB.axhline(0, color="k", lw=0.4, alpha=0.4); axB.set_yticks([])
+        axB.set_xlim(0, 1); axB.set_xlabel("Cardiac cycle phase")
+        axB.set_title("Human gold vs literature parenchymal pulse"); axB.legend(fontsize=8.5)
+    else:
+        axB.axis("off")
+
+    # C: closeness-to-human box plots + straw-man lines
+    axC = fig.add_subplot(gs[1, 0])
+    bp = axC.boxplot([Hself, Bcl], positions=[0, 1], widths=0.6, patch_artist=True,
+                     flierprops=dict(marker=".", markersize=3, alpha=0.25))
+    for patch, c in zip(bp["boxes"], [BLUE, RED]):
+        patch.set_facecolor(c); patch.set_alpha(0.5); patch.set_edgecolor(c)
+    for med in bp["medians"]:
+        med.set_color("k")
+    axC.axhline(sineR2, color="0.5", ls="--", lw=1.4)
+    axC.text(1.4, sineR2 + 0.01, f"sine straw man ({sineR2:.2f})", fontsize=8.5, color="0.4")
+    axC.axhline(0.0, color="0.7", ls=":", lw=1.4)
+    axC.text(1.4, 0.02, "flat (0.00)", fontsize=8.5, color="0.55")
+    axC.set_xticks([0, 1]); axC.set_xticklabels(["Human\n(self / ceiling)", "Bioreactor\n(model)"])
+    axC.set_ylabel("closeness to human gold (R²)"); axC.set_ylim(0, 1)
+    axC.set_title("Closeness to the human gold standard"); axC.grid(alpha=0.15, axis="y")
+
+    # D: verdict (data-driven: sine may or may not be beaten depending on the space)
+    axD = fig.add_subplot(gs[1, 1]); axD.axis("off")
+    if model > sineR2:
+        concl = (f"The bioreactor reaches {pct:.0f}% of the human ceiling and clears both the\n"
+                 "rate-matched sine and flat flow — it captures real parenchymal pulse\n"
+                 "shape, not just a generic oscillation.")
+    else:
+        concl = (f"Here the SINE straw man ({sineR2:.2f}) is a strong competitor and the bioreactor\n"
+                 f"({model:.2f}) falls below it. Integrating velocity→displacement low-pass-filters\n"
+                 "the pulse, so the pressure-space waveform is nearly sinusoidal (fundamental-\n"
+                 "dominated), and the bioreactor's integrated pulse is degraded by weak-signal\n"
+                 "(organoid) noise. The SPEED-space comparison is the more discriminating one.")
+    txt = (
+        "Human cortex is the gold standard (a real brain; better than any model).\n"
+        "Everything is scored by closeness to it.\n\n"
+        f"  • Human self-consistency ceiling:  R² = {ceil:.2f}\n"
+        f"  • Bioreactor model → human:        R² = {model:.2f}\n"
+        f"  • Sine straw man → human:          R² = {sineR2:.2f}\n"
+        f"  • Flat flow → human:               R² = 0.00\n\n"
+        f"{concl}\n\n"
+        f"Space: {space_label}."
+    )
+    axD.text(0.0, 0.98, txt, transform=axD.transAxes, va="top", ha="left", fontsize=10.5, linespacing=1.45)
+
+    fig.suptitle("Human cortex as gold standard — how close is the bioreactor model?",
+                 y=0.955, fontsize=14.5)
+    _save(fig, out)
+    return dict(ceiling=ceil, model=model, sine=sineR2, pct=pct)
+
+
+def gold_standard_figure(human_reps, bio_reps, out):
+    return gold_standard_core([(s, fps, f0) for s, fps, f0, _ in _human_signals(human_reps)],
+                              [(s, fps, f0) for s, fps, f0, _ in _bio_signals(bio_reps)],
+                              out, space_label="tissue speed", icp=pressure_templates())
