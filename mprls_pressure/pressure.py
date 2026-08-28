@@ -793,11 +793,13 @@ def plot_analysis(analysis: PressureAnalysis, output_path, *, zoom_s: float = 6.
     ax = fig.add_subplot(gs[1, 1])
     for name, ch in chans.items():
         if ch.n_beats:
+            ax.fill_between(ch.phase, ch.template - ch.template_std,
+                            ch.template + ch.template_std, color=colors[name], alpha=0.07)
+            ax.fill_between(ch.phase, ch.template - ch.template_sem,
+                            ch.template + ch.template_sem, color=colors[name], alpha=0.30)
             ax.plot(ch.phase, ch.template, color=colors[name], lw=1.8,
                     label=f"{name} (coh {ch.coherence*100:.0f}%, n={ch.n_beats})")
-            ax.fill_between(ch.phase, ch.template - ch.template_sem,
-                            ch.template + ch.template_sem, color=colors[name], alpha=0.25)
-    ax.set_title("representative pulse (avg +/- SEM; each aligned to its own foot)")
+    ax.set_title("representative pulse (band +/- SEM, faint +/- SD; each on own foot)")
     ax.set_xlabel("phase (fraction of beat)"); ax.set_ylabel("mmHg"); ax.legend(fontsize=7)
 
     # (2,0) instantaneous gradient, zoomed
@@ -856,14 +858,18 @@ def plot_pulses(analysis: PressureAnalysis, output_path, *, title: Optional[str]
 
     fig, (axL, axR) = plt.subplots(1, 2, figsize=(13, 5))
 
-    # left: per-channel representative pulses (mean +/- SEM), absolute mmHg scale
+    # left: per-channel representative pulses; faint band = per-beat SD (the
+    # vibration averaging removes), darker band = SEM (how well the mean pulse is
+    # known). Absolute mmHg scale.
     for name, ch in chans.items():
         if ch.n_beats:
+            axL.fill_between(ch.phase, ch.template - ch.template_std,
+                             ch.template + ch.template_std, color=colors[name], alpha=0.08)
+            axL.fill_between(ch.phase, ch.template - ch.template_sem,
+                             ch.template + ch.template_sem, color=colors[name], alpha=0.30)
             axL.plot(ch.phase, ch.template, color=colors[name], lw=2.0,
                      label=f"{name}  (p2p {ch.pulse_amplitude:.2f} mmHg, n={ch.n_beats})")
-            axL.fill_between(ch.phase, ch.template - ch.template_sem,
-                             ch.template + ch.template_sem, color=colors[name], alpha=0.25)
-    axL.set_title("Representative pulse (beat-averaged +/- SEM)")
+    axL.set_title("Representative pulse (band = +/- SEM, faint = +/- SD per beat)")
     axL.set_xlabel("phase (fraction of beat)"); axL.set_ylabel("mmHg")
     axL.legend(fontsize=8, loc="upper right")
 
