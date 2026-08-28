@@ -145,8 +145,12 @@ figure (`br_2_analysis.png`), and the three `*_summary.txt`.
   (rejects per-channel modulation sidebands).
 * **Repair** — linear dropout interpolation; Hampel (median/MAD) spike rejection.
 * **Continuous smoothing** — zero-phase Butterworth low-pass at `n_harmonics·f0`.
-* **Representative pulse** — ensemble average of the repaired signal + phase-domain
-  Savitzky-Golay (ring-free); SEM shows how well the mean pulse is determined.
+* **Representative pulse** — mean *shape* from the ensemble average of the repaired
+  signal + phase-domain Savitzky-Golay (ring-free). The bands are the **SEM** (how
+  well the mean pulse is determined — a thin ribbon over hundreds of beats) and the
+  faint **in-band SD** (beat-to-beat scatter of the *band-limited* beats; the SD of
+  the full-bandwidth beats is ~2× wider but ~half of it is out-of-band vibration
+  the smoothing already discards, so it is not shown).
 * **Gradient** — instantaneous difference; representative gradient pulse from a
   self-referential ensemble average of `g(t)`.
 * **Independent cross-check (optional)** — the sibling `pulsatility` tool extracts

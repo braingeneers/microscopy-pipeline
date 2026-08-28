@@ -400,6 +400,39 @@ def roll_to_foot(ens: Ensemble) -> Ensemble:
     )
 
 
+def representative_pulse(
+    mean_sig: np.ndarray,
+    band_sig: np.ndarray,
+    fs: float,
+    f0: float,
+    beats: np.ndarray,
+    n_bins: int,
+    smooth_frac: float,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float, int]:
+    """Assemble a display-ready representative pulse from two signals.
+
+    The **mean shape** is ensemble-averaged from ``mean_sig`` -- the repaired,
+    full-bandwidth signal -- then phase-smoothed (ring-free; see
+    :func:`smooth_template`). The **spread band** (SD, SEM) and the coherence come
+    from ``band_sig`` -- the *band-limited* (low-passed) signal -- so the band
+    reflects in-band beat-to-beat scatter rather than the broadband vibration the
+    smoothing already discards (about half of the full-band SD is out-of-band).
+    Both are aligned to the mean's diastolic foot. Returns
+    ``(phase, template, std, sem, coherence, n_beats)``.
+    """
+    ens_mean = ensemble_average(mean_sig, fs, f0, beats=beats, n_bins=n_bins)
+    ens_band = ensemble_average(band_sig, fs, f0, beats=beats, n_bins=n_bins)
+    phase = ens_mean.phase
+    if ens_mean.n_beats == 0 or not np.isfinite(ens_mean.mean).all():
+        nan = np.full(n_bins, np.nan)
+        return phase, nan, nan, nan, 0.0, 0
+    r = int(-np.argmin(ens_mean.mean)) % n_bins
+    template = smooth_template(np.roll(ens_mean.mean, r), smooth_frac)
+    std = np.roll(ens_band.std, r)
+    sem = np.roll(ens_band.sem, r)
+    return phase, template, std, sem, ens_band.coherence, ens_mean.n_beats
+
+
 # --------------------------------------------------------------------------- #
 # 6. Per-channel assembly
 # --------------------------------------------------------------------------- #
@@ -485,20 +518,20 @@ def analyze_channel(
     smooth = smooth_pressure(cleaned, fs, f0, n_harmonics=n_harmonics)
     if beats is None:
         beats = detect_beats(cleaned, fs, f0)
-    # The representative pulse is ensemble-averaged from the *cleaned* signal, NOT
-    # the low-passed one. Averaging hundreds of beats is itself a strong denoiser
-    # (~sqrt(n_beats)) and, unlike the Butterworth low-pass, it adds no ringing --
-    # low-passing before averaging puts an artefactual overshoot/"notch" on the
-    # sharp systolic peak. `smooth` is kept only for the continuous trace.
-    ens = roll_to_foot(ensemble_average(cleaned, fs, f0, beats=beats, n_bins=n_bins))
-    template = smooth_template(ens.mean, template_smooth_frac)
+    # Representative pulse: mean SHAPE from the cleaned (full-bandwidth) signal --
+    # averaging hundreds of beats denoises without the Butterworth ringing/"notch"
+    # a low-pass leaves on the systolic peak -- while the SPREAD band (SD/SEM) and
+    # coherence come from the band-limited `smooth` signal, so they reflect in-band
+    # beat-to-beat scatter rather than the broadband vibration we already discard.
+    phase, template, tstd, tsem, coh, nb = representative_pulse(
+        cleaned, smooth, fs, f0, beats, n_bins, template_smooth_frac)
 
     return ChannelResult(
         name=name, fs=fs, t=tu, raw=raw, cleaned=cleaned, smooth=smooth,
         f0=f0, bpm=f0 * 60.0, spectral_snr=snr,
         n_dropouts=int(nan_mask.sum()), n_spikes=int(spike_mask.sum()),
-        beats=beats, phase=ens.phase, template=template, template_std=ens.std,
-        template_sem=ens.sem, n_beats=ens.n_beats, coherence=ens.coherence,
+        beats=beats, phase=phase, template=template, template_std=tstd,
+        template_sem=tsem, n_beats=nb, coherence=coh,
         cutoff_hz=n_harmonics * f0,
     )
 
@@ -580,21 +613,22 @@ def pressure_gradient(
     t = a.t[:n]
     grad = a.smooth[:n] - b.smooth[:n]              # continuous trace (display, mean)
 
-    # Representative gradient pulse: ensemble-average the *cleaned* difference (no
-    # low-pass) so the template carries no filter ringing (see analyze_channel).
+    # Representative gradient pulse: mean SHAPE from the cleaned (full-bandwidth)
+    # difference (ring-free), spread band from the band-limited difference `grad`
+    # (in-band scatter). See representative_pulse / analyze_channel.
     grad_clean = a.cleaned[:n] - b.cleaned[:n]
     beats_g = detect_beats(grad_clean, a.fs, a.f0)
-    ens = roll_to_foot(ensemble_average(grad_clean, a.fs, a.f0, beats=beats_g, n_bins=n_bins))
-    gradient_template = smooth_template(ens.mean, DEFAULT_TEMPLATE_SMOOTH_FRAC)
-    pulsatile = (float(np.nanmax(gradient_template) - np.nanmin(gradient_template))
-                 if ens.n_beats else float("nan"))
+    phase, gtemplate, gstd, gsem, _, nb = representative_pulse(
+        grad_clean, grad, a.fs, a.f0, beats_g, n_bins, DEFAULT_TEMPLATE_SMOOTH_FRAC)
+    pulsatile = (float(np.nanmax(gtemplate) - np.nanmin(gtemplate))
+                 if nb else float("nan"))
 
     return GradientResult(
         a_name=a.name, b_name=b.name, fs=a.fs, t=t, gradient=grad,
-        phase=ens.phase, gradient_template=gradient_template,
-        gradient_template_std=ens.std, gradient_template_sem=ens.sem,
+        phase=phase, gradient_template=gtemplate,
+        gradient_template_std=gstd, gradient_template_sem=gsem,
         mean_gradient=float(np.mean(grad)),
-        pulsatile_amplitude=pulsatile, f0=a.f0, n_beats=ens.n_beats,
+        pulsatile_amplitude=pulsatile, f0=a.f0, n_beats=nb,
         cross_coherence_f0=cross_coherence(a, b, a.f0),
     )
 
@@ -799,7 +833,7 @@ def plot_analysis(analysis: PressureAnalysis, output_path, *, zoom_s: float = 6.
                             ch.template + ch.template_sem, color=colors[name], alpha=0.30)
             ax.plot(ch.phase, ch.template, color=colors[name], lw=1.8,
                     label=f"{name} (coh {ch.coherence*100:.0f}%, n={ch.n_beats})")
-    ax.set_title("representative pulse (band +/- SEM, faint +/- SD; each on own foot)")
+    ax.set_title("representative pulse (band +/- SEM, faint +/- in-band SD; own foot)")
     ax.set_xlabel("phase (fraction of beat)"); ax.set_ylabel("mmHg"); ax.legend(fontsize=7)
 
     # (2,0) instantaneous gradient, zoomed
@@ -819,7 +853,7 @@ def plot_analysis(analysis: PressureAnalysis, output_path, *, zoom_s: float = 6.
         gt = grad.gradient_template
         ax.fill_between(grad.phase, gt - grad.gradient_template_std,
                         gt + grad.gradient_template_std, color="#6a3d9a",
-                        alpha=0.10, label="+/- SD (per beat)")
+                        alpha=0.10, label="+/- in-band SD (per beat)")
         ax.fill_between(grad.phase, gt - grad.gradient_template_sem,
                         gt + grad.gradient_template_sem, color="#6a3d9a", alpha=0.35,
                         label="+/- SEM")
@@ -869,7 +903,7 @@ def plot_pulses(analysis: PressureAnalysis, output_path, *, title: Optional[str]
                              ch.template + ch.template_sem, color=colors[name], alpha=0.30)
             axL.plot(ch.phase, ch.template, color=colors[name], lw=2.0,
                      label=f"{name}  (p2p {ch.pulse_amplitude:.2f} mmHg, n={ch.n_beats})")
-    axL.set_title("Representative pulse (band = +/- SEM, faint = +/- SD per beat)")
+    axL.set_title("Representative pulse (band = +/- SEM, faint = +/- in-band SD per beat)")
     axL.set_xlabel("phase (fraction of beat)"); axL.set_ylabel("mmHg")
     axL.legend(fontsize=8, loc="upper right")
 
@@ -878,7 +912,7 @@ def plot_pulses(analysis: PressureAnalysis, output_path, *, title: Optional[str]
         gt = grad.gradient_template
         axR.fill_between(grad.phase, gt - grad.gradient_template_std,
                          gt + grad.gradient_template_std, color="#6a3d9a", alpha=0.10,
-                         label="+/- SD (per beat)")
+                         label="+/- in-band SD (per beat)")
         axR.fill_between(grad.phase, gt - grad.gradient_template_sem,
                          gt + grad.gradient_template_sem, color="#6a3d9a", alpha=0.35,
                          label="+/- SEM")
