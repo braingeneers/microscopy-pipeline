@@ -1,0 +1,13 @@
+MPRLS pressure analysis: /tmp/claude-0/-home-user-microscopy-pipeline/0a350957-1c75-57bf-a2f5-46603e35fdd3/scratchpad/data/br.csv
+  window analysed       : 295.3-535.3 s (240 s continuous)
+
+  input    :  105.5 bpm  mean=  5.059  pulse(p2p)=10.401 mmHg  | beat-locked=23.5%  beats=441  dropouts=186 spikes=24  noise removed(rms)= 6.063
+  output   :  105.5 bpm  mean=  1.083  pulse(p2p)= 0.739 mmHg  | beat-locked=25.7%  beats=417  dropouts=0 spikes=40  noise removed(rms)= 0.293
+  midpoint :  105.5 bpm  mean=  1.272  pulse(p2p)= 2.142 mmHg  | beat-locked=22.7%  beats=433  dropouts=0 spikes=18  noise removed(rms)= 1.199
+
+Pressure gradient  (input - output)
+  pulse rate            :   105.5 bpm  (1.758 Hz)
+  mean gradient (DC)    :   3.976 mmHg
+  pulsatile gradient    :  10.376 mmHg peak-to-peak
+  in-out coherence @f0  :    0.43 (0=decorrelated, 1=locked)
+  beats averaged        : 446
