@@ -837,6 +837,65 @@ def plot_analysis(analysis: PressureAnalysis, output_path, *, zoom_s: float = 6.
     return output_path
 
 
+def plot_pulses(analysis: PressureAnalysis, output_path, *, title: Optional[str] = None):
+    """Two-panel figure: the representative pulse (per channel) and the gradient pulse.
+
+    A stripped-down view of the two headline results -- the beat-averaged
+    representative pulse of each channel (left) and the input-output gradient pulse
+    (right), both with their SEM bands. The x-axis is phase (fraction of a beat);
+    the beat period in ms is annotated.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    chans = analysis.channels
+    grad = analysis.gradient
+    colors = {"input": "#1f77b4", "output": "#d62728", "midpoint": "#2ca02c"}
+    period_ms = 1000.0 / grad.f0 if grad.f0 > 0 else float("nan")
+
+    fig, (axL, axR) = plt.subplots(1, 2, figsize=(13, 5))
+
+    # left: per-channel representative pulses (mean +/- SEM), absolute mmHg scale
+    for name, ch in chans.items():
+        if ch.n_beats:
+            axL.plot(ch.phase, ch.template, color=colors[name], lw=2.0,
+                     label=f"{name}  (p2p {ch.pulse_amplitude:.2f} mmHg, n={ch.n_beats})")
+            axL.fill_between(ch.phase, ch.template - ch.template_sem,
+                             ch.template + ch.template_sem, color=colors[name], alpha=0.25)
+    axL.set_title("Representative pulse (beat-averaged +/- SEM)")
+    axL.set_xlabel("phase (fraction of beat)"); axL.set_ylabel("mmHg")
+    axL.legend(fontsize=8, loc="upper right")
+
+    # right: gradient pulse (SEM dark, per-beat SD faint, mean line)
+    if grad.n_beats:
+        gt = grad.gradient_template
+        axR.fill_between(grad.phase, gt - grad.gradient_template_std,
+                         gt + grad.gradient_template_std, color="#6a3d9a", alpha=0.10,
+                         label="+/- SD (per beat)")
+        axR.fill_between(grad.phase, gt - grad.gradient_template_sem,
+                         gt + grad.gradient_template_sem, color="#6a3d9a", alpha=0.35,
+                         label="+/- SEM")
+        axR.plot(grad.phase, gt, color="#6a3d9a", lw=2.4,
+                 label=f"gradient pulse (n={grad.n_beats})")
+        axR.axhline(grad.mean_gradient, color="k", ls="--", lw=1,
+                    label=f"mean = {grad.mean_gradient:.2f} mmHg")
+        axR.axhline(0, color="0.6", lw=0.8)
+    axR.set_title(f"Gradient pulse  ({grad.a_name} - {grad.b_name}; "
+                  f"p2p {grad.pulsatile_amplitude:.2f} mmHg)")
+    axR.set_xlabel("phase (fraction of beat)"); axR.set_ylabel("mmHg")
+    axR.legend(fontsize=8, loc="upper right")
+
+    if title is None:
+        title = (f"{Path(analysis.source).name} — {grad.f0*60:.1f} bpm "
+                 f"(beat {period_ms:.0f} ms)")
+    fig.suptitle(title, fontsize=13)
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    fig.savefig(output_path, dpi=120, bbox_inches="tight")
+    plt.close(fig)
+    return output_path
+
+
 def write_waveform_csv(analysis: PressureAnalysis, path):
     """Per-sample smoothed channels + gradient on the common time grid."""
     grad = analysis.gradient
@@ -899,6 +958,7 @@ def analyze_pressure_file(
         hampel_nsigma=hampel_nsigma, start_s=start_s, end_s=end_s, last_s=last_s,
     )
     plot_analysis(analysis, out / "pressure_analysis.png")
+    plot_pulses(analysis, out / "pressure_pulses.png")
     write_waveform_csv(analysis, out / "pressure_smoothed.csv")
     write_template_csv(analysis, out / "pressure_representative_pulse.csv")
     (out / "pressure_summary.txt").write_text(analysis.summary() + "\n")

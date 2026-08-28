@@ -299,6 +299,6 @@ def test_analyze_pressure_csv_and_file(tmp_path):
     # full file driver writes the figure + CSVs + summary
     out = tmp_path / "results"
     analyze_pressure_file(csv_path, out)
-    for fname in ["pressure_analysis.png", "pressure_smoothed.csv",
+    for fname in ["pressure_analysis.png", "pressure_pulses.png", "pressure_smoothed.csv",
                   "pressure_representative_pulse.csv", "pressure_summary.txt"]:
         assert (out / fname).exists() and (out / fname).stat().st_size > 0

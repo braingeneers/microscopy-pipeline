@@ -94,6 +94,7 @@ The recordings have a **startup transient**, so the analysis defaults to the
 | File | Contents |
 |---|---|
 | `pressure_analysis.png` | Headline figure: raw-vs-smoothed, spectra with the removed band, per-channel representative pulses, instantaneous gradient, representative gradient pulse |
+| `pressure_pulses.png` | Two-panel view: the per-channel representative pulse and the input−output gradient pulse (with SEM) |
 | `pressure_smoothed.csv` | Per-sample smoothed channels + instantaneous gradient on the common time grid |
 | `pressure_representative_pulse.csv` | Beat-averaged pulse of each channel + the gradient pulse (phase, mean, SD) |
 | `pressure_summary.txt` | The metrics block |
