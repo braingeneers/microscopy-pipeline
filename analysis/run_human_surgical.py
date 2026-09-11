@@ -69,11 +69,22 @@ def _clean_runs(raw, fps, min_run):
 
 
 def _f0(sig, fps):
-    """Cardiac fundamental (35-110 bpm) from the boxcar-detrended clean run."""
+    """Cardiac fundamental (bpm->Hz) from the boxcar-detrended clean run.
+
+    The strongest in-band peak can be a harmonic (a weak-signal run's 2nd harmonic
+    may top its fundamental), so prefer the lowest sub-multiple (pk/2, pk/3) that
+    still carries substantial power -- this rejects e.g. a spurious 2x reading."""
     d = sig - np.convolve(np.pad(sig, 30, mode="edge"), np.ones(61) / 61, "valid"); d -= d.mean()
     f = rfftfreq(len(d), 1 / fps); P = np.abs(rfft(d * np.hanning(len(d)))) ** 2; bpm = f * 60
-    fund = (bpm >= 35) & (bpm <= 110)
-    return float(f[fund][np.argmax(P[fund])])
+    band = (bpm >= 35) & (bpm <= 110); fb, Pb = bpm[band], P[band]
+    pk = fb[int(np.argmax(Pb))]
+    cands = [pk]
+    for k in (2, 3):                                   # demote harmonics to the fundamental
+        sub = pk / k
+        near = np.abs(fb - sub) <= 3
+        if sub >= 35 and near.any() and Pb[near].max() >= 0.4 * Pb.max():
+            cands.append(float(fb[near][int(np.argmax(Pb[near]))]))
+    return float(min(cands) / 60)
 
 
 def main(key, video, roi=None, min_run=14.0):
