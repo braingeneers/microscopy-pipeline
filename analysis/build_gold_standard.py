@@ -40,7 +40,18 @@ def main():
               dict(label="Human 2", cortex=h2["cortex"], resp=h2["resp"], fps=h2["fps"])]
     bio = [dict(results=bf[i]["results"], fps=bf[i]["fps"]) for i in (1, 2, 3)]
 
-    figures.gold_standard_figure(humans, bio, OUT / "gold_standard_speed")
+    # Optional surgical (hands-in-frame) human: joins the gold standard as a third,
+    # down-weighted real human (run_human_surgical.py -> <key>_surgical.pkl).
+    surg_sigs = None
+    surg_weight = float(os.environ.get("PULS_SURG_WEIGHT", "1.0"))   # 1.0 = equal to clean humans
+    surg_pkl = OUT / "human4_surgical.pkl"
+    if surg_pkl.exists():
+        srec = pickle.load(open(surg_pkl, "rb"))
+        surg_sigs = [(r["signal"], r["fps"], r["f0"]) for r in srec["runs"]]
+        print(f"surgical human4: {len(surg_sigs)} clean runs folded in (per-cycle weight {surg_weight})")
+
+    figures.gold_standard_figure(humans, bio, OUT / "gold_standard_speed",
+                                 surg_sigs=surg_sigs, surg_weight=surg_weight)
     print("built gold_standard_speed")
 
     if all((OUT / f"signed_{k}.pkl").exists() for k in ("human1", "human2", "bio1", "bio2", "bio3")):

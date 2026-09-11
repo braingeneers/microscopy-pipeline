@@ -747,21 +747,36 @@ def _norm_cycles(sigs, per=120):
     return np.array(cs) if cs else np.zeros((0, per))
 
 
-def gold_standard_core(human_sigs, bio_sigs, out, space_label="tissue speed", icp=None):
+def gold_standard_core(human_sigs, bio_sigs, out, space_label="tissue speed", icp=None,
+                       surg_sigs=None, surg_weight=0.3, surg_label="Human 4 (surgical)"):
     """human_sigs, bio_sigs: lists of (signal, fps, f0). `icp` optional template dict
-    (from pressure_templates) drawn as a literature check on the human gold pulse."""
+    (from pressure_templates) drawn as a literature check on the human gold pulse.
+
+    `surg_sigs` (optional) is the same list-of-(signal, fps, f0) for a hands-in-frame
+    SURGICAL human whose clean runs were recovered by run_human_surgical.py. It joins
+    the gold reference as a third real human but at a lower per-cycle weight
+    (`surg_weight`), so its intra-operative noise nudges — rather than defines — the
+    gold pulse. The pristine 4K humans still set the ±SD ceiling band."""
     per = 120; tau = np.linspace(0, 1, per, endpoint=False)
     HC, BC = _norm_cycles(human_sigs, per), _norm_cycles(bio_sigs, per)
-    gold = HC.mean(0); gold = gold - gold.mean()
-    gsd = HC.std(0)
+    SC = _norm_cycles(surg_sigs, per) if surg_sigs else np.zeros((0, per))
+    if len(SC):        # weighted gold: clean cycles at 1.0, surgical cycles down-weighted
+        gold = (HC.sum(0) + surg_weight * SC.sum(0)) / (len(HC) + surg_weight * len(SC))
+    else:
+        gold = HC.mean(0)
+    gold = gold - gold.mean()
+    gsd = HC.std(0)                                   # ceiling band = the clean 4K humans
     Hself = np.array([_match_R2(c, gold) for c in HC])
     Bcl = np.array([_match_R2(c, gold) for c in BC])
+    Scl = np.array([_match_R2(c, gold) for c in SC]) if len(SC) else np.array([])
     sineR2 = _match_R2(np.sin(2 * np.pi * tau), gold)
     ceil, model = float(np.median(Hself)), float(np.median(Bcl))
+    surg = float(np.median(Scl)) if len(Scl) else float("nan")
     pct = 100 * model / ceil if ceil else float("nan")
     bmean = _align_norm(BC.mean(0), gold)
     gN = gold / (np.max(np.abs(gold)) or 1); gsdN = gsd / (np.max(np.abs(gold)) or 1)
     sineN = np.roll(np.sin(2 * np.pi * tau), int(np.argmax(gold)))  # phase to gold peak
+    smeanN = _align_norm(SC.mean(0), gold) if len(SC) else None
 
     fig = plt.figure(figsize=(12, 11))
     gs = GridSpec(2, 2, figure=fig, height_ratios=[1.0, 0.95], hspace=0.42, wspace=0.24,
@@ -771,6 +786,9 @@ def gold_standard_core(human_sigs, bio_sigs, out, space_label="tissue speed", ic
     axA = fig.add_subplot(gs[0, 0])
     axA.fill_between(tau, gN - gsdN, gN + gsdN, color=BLUE, alpha=0.18, lw=0)
     axA.plot(tau, gN, color=BLUE, lw=2.6, label="Human cortex — GOLD STANDARD (± SD)")
+    if smeanN is not None:
+        wtxt = "equal weight" if abs(surg_weight - 1.0) < 1e-6 else f"weight {surg_weight:g}"
+        axA.plot(tau, smeanN, color=GREEN, lw=1.7, ls="-.", label=f"{surg_label} ({wtxt})")
     axA.plot(tau, bmean, color=RED, lw=1.9, label="Bioreactor (model)")
     axA.plot(tau, sineN, color="0.5", lw=1.5, ls="--", label="Sine straw man")
     axA.axhline(0, color="k", lw=0.4, alpha=0.4); axA.set_xlim(0, 1); axA.set_yticks([])
@@ -795,17 +813,26 @@ def gold_standard_core(human_sigs, bio_sigs, out, space_label="tissue speed", ic
 
     # C: closeness-to-human box plots + straw-man lines
     axC = fig.add_subplot(gs[1, 0])
-    bp = axC.boxplot([Hself, Bcl], positions=[0, 1], widths=0.6, patch_artist=True,
+    if len(Scl):
+        data, pos, cols = [Hself, Scl, Bcl], [0, 1, 2], [BLUE, GREEN, RED]
+        ticks, labs = [0, 1, 2], ["Clean humans\n(self / ceiling)", f"{surg_label}",
+                                  "Bioreactor\n(model)"]
+        txt_x = 2.4
+    else:
+        data, pos, cols = [Hself, Bcl], [0, 1], [BLUE, RED]
+        ticks, labs = [0, 1], ["Human\n(self / ceiling)", "Bioreactor\n(model)"]
+        txt_x = 1.4
+    bp = axC.boxplot(data, positions=pos, widths=0.6, patch_artist=True,
                      flierprops=dict(marker=".", markersize=3, alpha=0.25))
-    for patch, c in zip(bp["boxes"], [BLUE, RED]):
+    for patch, c in zip(bp["boxes"], cols):
         patch.set_facecolor(c); patch.set_alpha(0.5); patch.set_edgecolor(c)
     for med in bp["medians"]:
         med.set_color("k")
     axC.axhline(sineR2, color="0.5", ls="--", lw=1.4)
-    axC.text(1.4, sineR2 + 0.01, f"sine straw man ({sineR2:.2f})", fontsize=8.5, color="0.4")
+    axC.text(txt_x, sineR2 + 0.01, f"sine straw man ({sineR2:.2f})", fontsize=8.5, color="0.4")
     axC.axhline(0.0, color="0.7", ls=":", lw=1.4)
-    axC.text(1.4, 0.02, "flat (0.00)", fontsize=8.5, color="0.55")
-    axC.set_xticks([0, 1]); axC.set_xticklabels(["Human\n(self / ceiling)", "Bioreactor\n(model)"])
+    axC.text(txt_x, 0.02, "flat (0.00)", fontsize=8.5, color="0.55")
+    axC.set_xticks(ticks); axC.set_xticklabels(labs, fontsize=9.5)
     axC.set_ylabel("closeness to human gold (R²)"); axC.set_ylim(0, 1)
     axC.set_title("Closeness to the human gold standard"); axC.grid(alpha=0.15, axis="y")
 
@@ -821,10 +848,13 @@ def gold_standard_core(human_sigs, bio_sigs, out, space_label="tissue speed", ic
                  "the pulse, so the pressure-space waveform is nearly sinusoidal (fundamental-\n"
                  "dominated), and the bioreactor's integrated pulse is degraded by weak-signal\n"
                  "(organoid) noise. The SPEED-space comparison is the more discriminating one.")
+    surg_line = (f"  • {surg_label} → human:{' ' * max(1, 22 - len(surg_label))}R² = {surg:.2f}"
+                 f"  (real, but intra-operative & noisier)\n") if len(Scl) else ""
     txt = (
         "Human cortex is the gold standard (a real brain; better than any model).\n"
         "Everything is scored by closeness to it.\n\n"
-        f"  • Human self-consistency ceiling:  R² = {ceil:.2f}\n"
+        f"  • Clean-human self-consistency ceiling:  R² = {ceil:.2f}\n"
+        f"{surg_line}"
         f"  • Bioreactor model → human:        R² = {model:.2f}\n"
         f"  • Sine straw man → human:          R² = {sineR2:.2f}\n"
         f"  • Flat flow → human:               R² = 0.00\n\n"
@@ -836,10 +866,11 @@ def gold_standard_core(human_sigs, bio_sigs, out, space_label="tissue speed", ic
     fig.suptitle("Human cortex as gold standard — how close is the bioreactor model?",
                  y=0.955, fontsize=14.5)
     _save(fig, out)
-    return dict(ceiling=ceil, model=model, sine=sineR2, pct=pct)
+    return dict(ceiling=ceil, model=model, sine=sineR2, pct=pct, surgical=surg)
 
 
-def gold_standard_figure(human_reps, bio_reps, out):
+def gold_standard_figure(human_reps, bio_reps, out, surg_sigs=None, surg_weight=0.3):
     return gold_standard_core([(s, fps, f0) for s, fps, f0, _ in _human_signals(human_reps)],
                               [(s, fps, f0) for s, fps, f0, _ in _bio_signals(bio_reps)],
-                              out, space_label="tissue speed", icp=pressure_templates())
+                              out, space_label="tissue speed", icp=pressure_templates(),
+                              surg_sigs=surg_sigs, surg_weight=surg_weight)
