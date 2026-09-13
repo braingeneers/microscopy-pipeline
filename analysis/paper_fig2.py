@@ -131,12 +131,14 @@ def build(H, B, out):
     gt = outer[0].subgridspec(3, 1, hspace=0.18)       # tight stack of waveform strips
     gb = outer[1].subgridspec(1, 3, wspace=0.52)
 
+    yt = [0.0, 0.5, 1.0]
+
     def _strip(ax, x, m, s, color, ylabel, last=False):
         ax.fill_between(x, m - s, m + s, color=color, alpha=0.18, lw=0)
         ax.plot(x, m, color=color, lw=1.5)
         ax.axhline(0, color="0.65", lw=0.5, zorder=0)
-        ax.set_xlim(0, NPw); ax.set_xticks(range(NPw + 1)); ax.set_ylim(ymin, ymax); ax.set_yticks([])
-        ax.set_ylabel(ylabel, fontsize=9); ax.spines["left"].set_visible(False)
+        ax.set_xlim(0, NPw); ax.set_xticks(range(NPw + 1)); ax.set_ylim(ymin, ymax); ax.set_yticks(yt)
+        ax.set_ylabel(f"{ylabel}\n(norm. a.u.)", fontsize=8.5)
         ax.set_xlabel("Cardiac cycles (rate-standardized)") if last else ax.set_xticklabels([])
 
     axa = fig.add_subplot(gt[0]); _strip(axa, xh, hm, hs, BLUE, "Human"); _panel(axa, "a")
@@ -145,8 +147,8 @@ def build(H, B, out):
     axc.plot(xh, hm, color=BLUE, lw=1.5, label="Human")
     axc.plot(xb, bm, color=RED, lw=1.5, label="Bioreactor")
     axc.axhline(0, color="0.65", lw=0.5, zorder=0)
-    axc.set_xlim(0, NPw); axc.set_xticks(range(NPw + 1)); axc.set_ylim(ymin, ymax); axc.set_yticks([])
-    axc.set_ylabel("Overlay", fontsize=9); axc.spines["left"].set_visible(False)
+    axc.set_xlim(0, NPw); axc.set_xticks(range(NPw + 1)); axc.set_ylim(ymin, ymax); axc.set_yticks(yt)
+    axc.set_ylabel("Overlay\n(norm. a.u.)", fontsize=8.5)
     axc.set_xlabel("Cardiac cycles (rate-standardized)")
     axc.legend(loc="upper right", frameon=False, ncol=2, handlelength=1.3, fontsize=7.5, columnspacing=1.1)
     _panel(axc, "c")
