@@ -1,16 +1,15 @@
 """Figure 2 (paper, Nature style): human cortex vs bioreactor pulsatility.
 
-Human side pools replicates 1, 2 and 4 with EQUAL per-cycle weight (human 4 is the
+Human side pools patients 1, 2 and 4 with EQUAL PER-PATIENT weight (patient 4 is the
 surgical/hands-in-frame recording, clean runs recovered by run_human_surgical.py).
 Bioreactor side pools all organoids across the 3 replicates.
 
 Emits a self-contained bundle: small PNG preview, vector PDF, editable PPTX
-(SVG -> PowerPoint via LibreOffice), and one CSV of the underlying data per panel,
-all zipped. Panels:
-    a  mean cardiac pulse (ensemble mean +/- SD), human vs bioreactor superimposed
-    b  frequency spectrum, human vs bioreactor
-    c  pulsatility magnitude      d  time above trough+1SD
-    e  time below trough+1SD      f  inter-beat interval
+(300-dpi figure + editable caption; python-pptx), and one CSV of the underlying data
+per panel, all zipped. Panels:
+    a  human cortex mean pulse +/- SD    b  bioreactor mean pulse +/- SD  (side by side)
+    c  the two mean pulses superimposed  d  frequency spectrum
+    e  pulsatility magnitude   f/g  time above/below trough+1SD   h  inter-beat interval
 
 Usage:  python paper_fig2.py            # reads $PULS_WORK/out, writes .../out/fig2_bundle
 """
@@ -26,7 +25,7 @@ import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 
 WORK = Path(os.environ.get("PULS_WORK", "./pulsatility_work")); OUT = WORK / "out"
-PER = 100; NP = 4; BPM = np.linspace(0, 260, 400)
+PER = 100; BPM = np.linspace(0, 260, 400)
 load = lambda n: pickle.load(open(OUT / f"{n}.pkl", "rb"))
 
 
@@ -40,7 +39,12 @@ def _rep_stats(sig, fps, f0):
     return dict(mag=F["mag"], ta=F["ta"], tb=F["tb"], isi=isi, cyc=Cn, spec=spec, rate=f0 * 60)
 
 
-def _pool_humans(reps_12, surg_runs, hp=12.0):
+def _pool_humans(reps_12, surg_runs, hp=12.0, seed=0):
+    """Pool human patients 1, 2 and 4 with EQUAL PER-PATIENT weight (patient 4 is the
+    surgical recording, its clean runs pooled into one patient). The mean pulse is a
+    per-patient-weighted average (each patient's cycles sum to weight 1); box-plot
+    metrics subsample each patient to a common count so none dominates by beat count."""
+    rng = np.random.default_rng(seed)
     reps = []
     for d in reps_12:
         ctx, resp, fps = d["cortex"], d["resp"], d["fps"]
@@ -51,12 +55,22 @@ def _pool_humans(reps_12, surg_runs, hp=12.0):
                      tb=np.concatenate([r["tb"] for r in rs]), isi=np.concatenate([r["isi"] for r in rs]),
                      cyc=np.vstack([r["cyc"] for r in rs]), spec=np.mean([r["spec"] for r in rs], 0),
                      rate=float(np.median([r["rate"] for r in rs]))))
-    cat = lambda k: np.concatenate([r[k] for r in reps])
-    allc = np.vstack([r["cyc"] for r in reps])                             # equal per-cycle pool
-    return dict(mag=cat("mag"), ta=cat("ta"), tb=cat("tb"), isi=cat("isi"),
-                cyc_mean=allc.mean(0), cyc_sd=allc.std(0), n_cyc=len(allc),
+    R = len(reps)
+    cyc_list = [r["cyc"] for r in reps]
+    allc = np.vstack(cyc_list)
+    w = np.concatenate([np.full(len(c), 1.0 / (R * len(c))) for c in cyc_list])   # each patient -> weight 1
+    cyc_mean = np.average(allc, axis=0, weights=w)
+    cyc_sd = np.sqrt(np.average((allc - cyc_mean) ** 2, axis=0, weights=w))
+    def eq(key):                                        # equal-count subsample -> per-patient-equal
+        arrs = [r[key] for r in reps if len(r[key])]
+        if not arrs:
+            return np.array([])
+        k = min(len(a) for a in arrs)
+        return np.concatenate([rng.choice(a, k, replace=False) for a in arrs])
+    return dict(mag=eq("mag"), ta=eq("ta"), tb=eq("tb"), isi=eq("isi"),
+                cyc_mean=cyc_mean, cyc_sd=cyc_sd, n_cyc=len(allc),
                 spec=np.mean([r["spec"] for r in reps], 0), bpm=BPM,
-                rate=float(np.median([r["rate"] for r in reps])), n_h=len(reps))
+                rate=float(np.median([r["rate"] for r in reps])), n_h=R)
 
 
 def _tile(mean, sd, n):
@@ -94,41 +108,52 @@ def _box(ax, data, ylabel, title):
 def build(H, B, out):
     _style()
     hbpm, bbpm = H["rate"], float(np.median(B["rep_bpm"]))
-    xh, hm, hs = _tile(H["cyc_mean"], H["cyc_sd"], NP)
-    xb, bm, bs = _tile(B["cyc_mean"], B["cyc_sd"], NP)
-    fig = plt.figure(figsize=(7.2, 4.3))
-    gs = GridSpec(2, 4, figure=fig, height_ratios=[1.15, 1.0], hspace=0.55, wspace=0.5,
-                  top=0.9, bottom=0.12, left=0.07, right=0.985)
+    NPw = 2                                            # cycles shown per waveform panel
+    xh, hm, hs = _tile(H["cyc_mean"], H["cyc_sd"], NPw)
+    xb, bm, bs = _tile(B["cyc_mean"], B["cyc_sd"], NPw)
+    ymax = max((hm + hs).max(), (bm + bs).max()) * 1.06
+    ymin = min((hm - hs).min(), (bm - bs).min()) * 1.06
+    fig = plt.figure(figsize=(8.6, 4.4))
+    gs = GridSpec(2, 4, figure=fig, height_ratios=[1.05, 1.0], hspace=0.62, wspace=0.42,
+                  top=0.9, bottom=0.12, left=0.06, right=0.99)
 
-    # a: superimposed mean pulse +/- SD
-    axa = fig.add_subplot(gs[0, 0:2])
-    axa.fill_between(xh, hm - hs, hm + hs, color=BLUE, alpha=0.15, lw=0)
-    axa.fill_between(xb, bm - bs, bm + bs, color=RED, alpha=0.15, lw=0)
-    axa.plot(xh, hm, color=BLUE, lw=1.3, label="Human")
-    axa.plot(xb, bm, color=RED, lw=1.3, label="Bioreactor")
-    axa.axhline(0, color="k", lw=0.4, alpha=0.4)
-    axa.set_xlim(0, NP); axa.set_xticks(range(NP + 1)); axa.set_yticks([])
-    axa.set_xlabel("Cardiac cycle (rate-standardized)"); axa.set_ylabel("Normalized motion")
-    axa.set_title("Mean cardiac pulse ± SD")
-    axa.legend(loc="upper left", frameon=False, handlelength=1.3, borderaxespad=0.2)
-    _panel(axa, "a")
+    def _wave(ax, x, m, s, color):
+        ax.fill_between(x, m - s, m + s, color=color, alpha=0.15, lw=0)
+        ax.plot(x, m, color=color, lw=1.2)
+        ax.axhline(0, color="k", lw=0.4, alpha=0.4)
+        ax.set_xlim(0, NPw); ax.set_xticks(range(NPw + 1)); ax.set_ylim(ymin, ymax); ax.set_yticks([])
+        ax.set_xlabel("Cardiac cycle")
 
-    # b: frequency spectrum
-    axb = fig.add_subplot(gs[0, 2:4])
-    axb.plot(H["bpm"], H["spec"] / (H["spec"].max() or 1), color=BLUE, lw=1.1, label="Human")
-    axb.plot(B["bpm"], B["spec"] / (B["spec"].max() or 1), color=RED, lw=1.1, label="Bioreactor")
+    # a, b: human and bioreactor pulses side by side (shared y-scale); c: mean overlay
+    axa = fig.add_subplot(gs[0, 0]); _wave(axa, xh, hm, hs, BLUE)
+    axa.set_ylabel("Normalized motion"); axa.set_title("Human cortex"); _panel(axa, "a")
+    axb = fig.add_subplot(gs[0, 1]); _wave(axb, xb, bm, bs, RED)
+    axb.set_title("Bioreactor"); _panel(axb, "b")
+    axc = fig.add_subplot(gs[0, 2])
+    axc.plot(xh, hm, color=BLUE, lw=1.2, label="Human")
+    axc.plot(xb, bm, color=RED, lw=1.2, label="Bioreactor")
+    axc.axhline(0, color="k", lw=0.4, alpha=0.4)
+    axc.set_xlim(0, NPw); axc.set_xticks(range(NPw + 1)); axc.set_ylim(ymin, ymax); axc.set_yticks([])
+    axc.set_xlabel("Cardiac cycle"); axc.set_title("Mean pulse overlay")
+    axc.legend(loc="upper right", frameon=False, handlelength=1.1, fontsize=6.3, borderaxespad=0.15)
+    _panel(axc, "c")
+
+    # d: frequency spectrum
+    axd = fig.add_subplot(gs[0, 3])
+    axd.plot(H["bpm"], H["spec"] / (H["spec"].max() or 1), color=BLUE, lw=1.0, label="Human")
+    axd.plot(B["bpm"], B["spec"] / (B["spec"].max() or 1), color=RED, lw=1.0, label="Bioreactor")
     for v, c in [(hbpm, BLUE), (bbpm, RED)]:
-        axb.axvline(v, color=c, ls="--", lw=0.6, alpha=0.6)
-    axb.set_xlim(0, 240); axb.set_yticks([]); axb.set_xlabel("Rate (bpm)")
-    axb.set_ylabel("Power (norm.)"); axb.set_title("Frequency spectrum")
-    axb.legend(loc="upper right", frameon=False, handlelength=1.4)
-    _panel(axb, "b")
+        axd.axvline(v, color=c, ls="--", lw=0.6, alpha=0.6)
+    axd.set_xlim(0, 240); axd.set_yticks([]); axd.set_xlabel("Rate (bpm)")
+    axd.set_ylabel("Power (norm.)"); axd.set_title("Frequency spectrum")
+    axd.legend(loc="upper right", frameon=False, handlelength=1.1, fontsize=6.3)
+    _panel(axd, "d")
 
-    # c-f: box plots
-    specs = [("c", [H["mag"], B["mag"]], "px per frame", "Pulsatility magnitude"),
-             ("d", [H["ta"], B["ta"]], "% of cycle", "Time above trough+1SD"),
-             ("e", [H["tb"], B["tb"]], "% of cycle", "Time below trough+1SD"),
-             ("f", [H["isi"], B["isi"]], "× median cycle", "Inter-beat interval")]
+    # e-h: box plots
+    specs = [("e", [H["mag"], B["mag"]], "px per frame", "Pulsatility\nmagnitude"),
+             ("f", [H["ta"], B["ta"]], "% of cycle", "Time above\ntrough+1SD"),
+             ("g", [H["tb"], B["tb"]], "% of cycle", "Time below\ntrough+1SD"),
+             ("h", [H["isi"], B["isi"]], "× median cycle", "Inter-beat\ninterval")]
     for i, (letter, data, ylab, title) in enumerate(specs):
         ax = fig.add_subplot(gs[1, i]); _box(ax, data, ylab, title); _panel(ax, letter)
 
@@ -143,18 +168,18 @@ def build(H, B, out):
 def _write_csvs(H, B, cdir):
     cdir.mkdir(parents=True, exist_ok=True)
     ph = np.linspace(0, 1, PER, endpoint=False)
-    with open(cdir / "panel_a_mean_waveform.csv", "w", newline="") as f:
+    with open(cdir / "panels_abc_mean_waveforms.csv", "w", newline="") as f:
         w = csv.writer(f); w.writerow(["cardiac_phase", "human_mean", "human_sd", "bioreactor_mean", "bioreactor_sd"])
         for i in range(PER):
             w.writerow([f"{ph[i]:.4f}", f"{H['cyc_mean'][i]:.6f}", f"{H['cyc_sd'][i]:.6f}",
                         f"{B['cyc_mean'][i]:.6f}", f"{B['cyc_sd'][i]:.6f}"])
-    with open(cdir / "panel_b_frequency_spectrum.csv", "w", newline="") as f:
+    with open(cdir / "panel_d_frequency_spectrum.csv", "w", newline="") as f:
         w = csv.writer(f); w.writerow(["rate_bpm", "human_power_norm", "bioreactor_power_norm"])
         hs = H["spec"] / (H["spec"].max() or 1); bsp = B["spec"] / (B["spec"].max() or 1)
         for i in range(len(BPM)):
             w.writerow([f"{BPM[i]:.3f}", f"{hs[i]:.6f}", f"{bsp[i]:.6f}"])
-    for name, key in [("panel_c_pulsatility_magnitude", "mag"), ("panel_d_time_above_pct", "ta"),
-                      ("panel_e_time_below_pct", "tb"), ("panel_f_interbeat_interval", "isi")]:
+    for name, key in [("panel_e_pulsatility_magnitude", "mag"), ("panel_f_time_above_pct", "ta"),
+                      ("panel_g_time_below_pct", "tb"), ("panel_h_interbeat_interval", "isi")]:
         with open(cdir / f"{name}.csv", "w", newline="") as f:
             w = csv.writer(f); w.writerow(["group", "value"])
             for grp, arr in [("human", H[key]), ("bioreactor", B[key])]:
@@ -165,9 +190,10 @@ def _write_csvs(H, B, cdir):
 README = (
     "Figure 2 — Human cortex vs bioreactor pulsatility\n"
     "==================================================\n\n"
-    "Human = replicates 1, 2 and 4 pooled with EQUAL per-cycle weight (replicate 4 is the\n"
-    "surgical/hands-in-frame recording; clean hand-free runs recovered before pooling).\n"
-    "Bioreactor = all organoids pooled across 3 replicates.\n\n"
+    "Human = patients 1, 2 and 4 pooled with EQUAL PER-PATIENT weight (patient 4 is the\n"
+    "surgical/hands-in-frame recording; clean hand-free runs recovered and treated as one\n"
+    "patient). The mean pulse is a per-patient-weighted average; box-plot metrics subsample\n"
+    "each patient to a common count. Bioreactor = all organoids pooled across 3 replicates.\n\n"
     "Files:\n"
     "  Figure2.pdf          vector figure (submission)\n"
     "  Figure2.svg          vector source (open in Illustrator/Inkscape, or Insert into\n"
@@ -175,10 +201,11 @@ README = (
     "  Figure2.pptx         editable slide: 300-dpi figure + editable caption text box\n"
     "  Figure2_preview.png  raster preview\n"
     "  csv/                 one file per panel with the plotted data\n\n"
-    "Panels: a mean cardiac pulse ±SD (rate-standardized ensemble, superimposed);\n"
-    "b frequency spectrum; c pulsatility magnitude; d time above trough+1SD;\n"
-    "e time below trough+1SD; f inter-beat interval. Waveform cycles are per-cycle\n"
-    "amplitude-normalized; panel a shows one mean cycle tiled for display.\n"
+    "Panels: a human cortex mean pulse ±SD; b bioreactor mean pulse ±SD (side by side,\n"
+    "shared scale); c the two mean pulses superimposed; d frequency spectrum;\n"
+    "e pulsatility magnitude; f time above trough+1SD; g time below trough+1SD;\n"
+    "h inter-beat interval. Cycles are per-cycle amplitude-normalized and rate-\n"
+    "standardized; panels a-c show the mean cycle tiled for display.\n"
 )
 
 
@@ -224,11 +251,12 @@ def main():
     _write_csvs(H, B, bdir / "csv")
     (bdir / "README.txt").write_text(README)
     bbpm = float(np.median(B["rep_bpm"]))
-    caption = (f"Figure 2 | Parenchymal pulsatility, human cortex vs bioreactor. Human = replicates "
-               f"1, 2 and 4 pooled with equal per-cycle weight ({H['n_cyc']} beats, {H['rate']:.0f} bpm median); "
-               f"bioreactor = {B['n_org']} organoids across 3 replicates ({B['n_cyc']} beats, {bbpm:.0f} bpm). "
-               f"a, Mean cardiac pulse ± SD (rate-standardized ensemble, superimposed). b, Frequency spectrum. "
-               f"c, Pulsatility magnitude. d,e, Time above/below trough+1SD. f, Inter-beat interval.")
+    caption = (f"Figure 2 | Parenchymal pulsatility, human cortex vs bioreactor. Human = patients "
+               f"1, 2 and 4 pooled with equal per-patient weight ({H['n_cyc']} beats across 3 patients, "
+               f"{H['rate']:.0f} bpm median); bioreactor = {B['n_org']} organoids across 3 replicates "
+               f"({B['n_cyc']} beats, {bbpm:.0f} bpm). a,b, Human and bioreactor mean cardiac pulse ± SD "
+               f"(rate-standardized, shared scale). c, The two mean pulses superimposed. d, Frequency spectrum. "
+               f"e, Pulsatility magnitude. f,g, Time above/below trough+1SD. h, Inter-beat interval.")
     ok = make_pptx(bdir / "Figure2_hires.png", bdir / "Figure2.pptx", caption)
     (bdir / "Figure2_hires.png").unlink()                    # embed-only; keep the bundle tidy
 
