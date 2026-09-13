@@ -7,9 +7,9 @@ Bioreactor side pools all organoids across the 3 replicates.
 Emits a self-contained bundle: small PNG preview, vector PDF, editable PPTX
 (300-dpi figure + editable caption; python-pptx), and one CSV of the underlying data
 per panel, all zipped. Panels:
-    a  human cortex mean pulse +/- SD    b  bioreactor mean pulse +/- SD  (side by side)
+    a  human cortex mean pulse +/- SD    b  bioreactor mean pulse +/- SD  (stacked, 5 beats)
     c  the two mean pulses superimposed  d  frequency spectrum
-    e  pulsatility magnitude   f/g  time above/below trough+1SD   h  inter-beat interval
+    e  pulsatility magnitude             f  inter-beat interval
 
 Usage:  python paper_fig2.py            # reads $PULS_WORK/out, writes .../out/fig2_bundle
 """
@@ -105,57 +105,62 @@ def _box(ax, data, ylabel, title):
     ax.set_ylabel(ylabel); ax.set_title(title); ax.grid(alpha=0.13, axis="y", lw=0.5)
 
 
+def _smooth(y, k=5):
+    if k <= 1:
+        return y
+    return np.convolve(np.pad(y, k // 2, mode="edge"), np.ones(k) / k, "valid")[:len(y)]
+
+
 def build(H, B, out):
     _style()
     hbpm, bbpm = H["rate"], float(np.median(B["rep_bpm"]))
-    NPw = 2                                            # cycles shown per waveform panel
-    xh, hm, hs = _tile(H["cyc_mean"], H["cyc_sd"], NPw)
-    xb, bm, bs = _tile(B["cyc_mean"], B["cyc_sd"], NPw)
-    ymax = max((hm + hs).max(), (bm + bs).max()) * 1.06
-    ymin = min((hm - hs).min(), (bm - bs).min()) * 1.06
-    fig = plt.figure(figsize=(8.6, 4.4))
-    gs = GridSpec(2, 4, figure=fig, height_ratios=[1.05, 1.0], hspace=0.62, wspace=0.42,
-                  top=0.9, bottom=0.12, left=0.06, right=0.99)
+    NPw = 5                                            # beats shown per waveform strip
 
-    def _wave(ax, x, m, s, color):
-        ax.fill_between(x, m - s, m + s, color=color, alpha=0.15, lw=0)
-        ax.plot(x, m, color=color, lw=1.2)
-        ax.axhline(0, color="k", lw=0.4, alpha=0.4)
+    def roll_to(m, s, tgt=0.30):                       # peak ~1/3 into each beat -> readable pulse
+        sh = int(tgt * PER) - int(np.argmax(m)); return np.roll(m, sh), np.roll(s, sh)
+    hm0, hs0 = roll_to(H["cyc_mean"], H["cyc_sd"])
+    bm0, bs0 = roll_to(B["cyc_mean"], B["cyc_sd"])
+    xh, hm, hs = _tile(hm0, hs0, NPw)
+    xb, bm, bs = _tile(bm0, bs0, NPw)
+    ymax = max((hm + hs).max(), (bm + bs).max()) * 1.1
+    ymin = min((hm - hs).min(), (bm - bs).min()) * 1.1
+
+    fig = plt.figure(figsize=(7.2, 6.3))
+    outer = GridSpec(2, 1, figure=fig, height_ratios=[1.5, 1.0], hspace=0.34,
+                     top=0.965, bottom=0.075, left=0.10, right=0.975)
+    gt = outer[0].subgridspec(3, 1, hspace=0.18)       # tight stack of waveform strips
+    gb = outer[1].subgridspec(1, 3, wspace=0.52)
+
+    def _strip(ax, x, m, s, color, ylabel, last=False):
+        ax.fill_between(x, m - s, m + s, color=color, alpha=0.18, lw=0)
+        ax.plot(x, m, color=color, lw=1.5)
+        ax.axhline(0, color="0.65", lw=0.5, zorder=0)
         ax.set_xlim(0, NPw); ax.set_xticks(range(NPw + 1)); ax.set_ylim(ymin, ymax); ax.set_yticks([])
-        ax.set_xlabel("Cardiac cycle")
+        ax.set_ylabel(ylabel, fontsize=9); ax.spines["left"].set_visible(False)
+        ax.set_xlabel("Cardiac cycles (rate-standardized)") if last else ax.set_xticklabels([])
 
-    # a, b: human and bioreactor pulses side by side (shared y-scale); c: mean overlay
-    axa = fig.add_subplot(gs[0, 0]); _wave(axa, xh, hm, hs, BLUE)
-    axa.set_ylabel("Normalized motion"); axa.set_title("Human cortex"); _panel(axa, "a")
-    axb = fig.add_subplot(gs[0, 1]); _wave(axb, xb, bm, bs, RED)
-    axb.set_title("Bioreactor"); _panel(axb, "b")
-    axc = fig.add_subplot(gs[0, 2])
-    axc.plot(xh, hm, color=BLUE, lw=1.2, label="Human")
-    axc.plot(xb, bm, color=RED, lw=1.2, label="Bioreactor")
-    axc.axhline(0, color="k", lw=0.4, alpha=0.4)
+    axa = fig.add_subplot(gt[0]); _strip(axa, xh, hm, hs, BLUE, "Human"); _panel(axa, "a")
+    axb = fig.add_subplot(gt[1]); _strip(axb, xb, bm, bs, RED, "Bioreactor"); _panel(axb, "b")
+    axc = fig.add_subplot(gt[2])
+    axc.plot(xh, hm, color=BLUE, lw=1.5, label="Human")
+    axc.plot(xb, bm, color=RED, lw=1.5, label="Bioreactor")
+    axc.axhline(0, color="0.65", lw=0.5, zorder=0)
     axc.set_xlim(0, NPw); axc.set_xticks(range(NPw + 1)); axc.set_ylim(ymin, ymax); axc.set_yticks([])
-    axc.set_xlabel("Cardiac cycle"); axc.set_title("Mean pulse overlay")
-    axc.legend(loc="upper right", frameon=False, handlelength=1.1, fontsize=6.3, borderaxespad=0.15)
+    axc.set_ylabel("Overlay", fontsize=9); axc.spines["left"].set_visible(False)
+    axc.set_xlabel("Cardiac cycles (rate-standardized)")
+    axc.legend(loc="upper right", frameon=False, ncol=2, handlelength=1.3, fontsize=7.5, columnspacing=1.1)
     _panel(axc, "c")
 
-    # d: frequency spectrum
-    axd = fig.add_subplot(gs[0, 3])
-    axd.plot(H["bpm"], H["spec"] / (H["spec"].max() or 1), color=BLUE, lw=1.0, label="Human")
-    axd.plot(B["bpm"], B["spec"] / (B["spec"].max() or 1), color=RED, lw=1.0, label="Bioreactor")
-    for v, c in [(hbpm, BLUE), (bbpm, RED)]:
-        axd.axvline(v, color=c, ls="--", lw=0.6, alpha=0.6)
-    axd.set_xlim(0, 240); axd.set_yticks([]); axd.set_xlabel("Rate (bpm)")
-    axd.set_ylabel("Power (norm.)"); axd.set_title("Frequency spectrum")
-    axd.legend(loc="upper right", frameon=False, handlelength=1.1, fontsize=6.3)
+    # d: frequency spectrum (lightly smoothed); e: magnitude; f: inter-beat interval
+    axd = fig.add_subplot(gb[0])
+    axd.plot(H["bpm"], _smooth(H["spec"] / (H["spec"].max() or 1)), color=BLUE, lw=1.3, label="Human")
+    axd.plot(B["bpm"], _smooth(B["spec"] / (B["spec"].max() or 1)), color=RED, lw=1.3, label="Bioreactor")
+    axd.set_xlim(0, 180); axd.set_ylim(bottom=0); axd.set_yticks([]); axd.set_xlabel("Rate (bpm)")
+    axd.set_ylabel("Power"); axd.set_title("Frequency spectrum")
+    axd.legend(loc="upper right", frameon=False, handlelength=1.3, fontsize=7.5)
     _panel(axd, "d")
-
-    # e-h: box plots
-    specs = [("e", [H["mag"], B["mag"]], "px per frame", "Pulsatility\nmagnitude"),
-             ("f", [H["ta"], B["ta"]], "% of cycle", "Time above\ntrough+1SD"),
-             ("g", [H["tb"], B["tb"]], "% of cycle", "Time below\ntrough+1SD"),
-             ("h", [H["isi"], B["isi"]], "× median cycle", "Inter-beat\ninterval")]
-    for i, (letter, data, ylab, title) in enumerate(specs):
-        ax = fig.add_subplot(gs[1, i]); _box(ax, data, ylab, title); _panel(ax, letter)
+    axe = fig.add_subplot(gb[1]); _box(axe, [H["mag"], B["mag"]], "px per frame", "Pulsatility magnitude"); _panel(axe, "e")
+    axf = fig.add_subplot(gb[2]); _box(axf, [H["isi"], B["isi"]], "× median cycle", "Inter-beat interval"); _panel(axf, "f")
 
     fig.savefig(f"{out}.pdf", bbox_inches="tight")
     fig.savefig(f"{out}.svg", bbox_inches="tight")
@@ -178,8 +183,7 @@ def _write_csvs(H, B, cdir):
         hs = H["spec"] / (H["spec"].max() or 1); bsp = B["spec"] / (B["spec"].max() or 1)
         for i in range(len(BPM)):
             w.writerow([f"{BPM[i]:.3f}", f"{hs[i]:.6f}", f"{bsp[i]:.6f}"])
-    for name, key in [("panel_e_pulsatility_magnitude", "mag"), ("panel_f_time_above_pct", "ta"),
-                      ("panel_g_time_below_pct", "tb"), ("panel_h_interbeat_interval", "isi")]:
+    for name, key in [("panel_e_pulsatility_magnitude", "mag"), ("panel_f_interbeat_interval", "isi")]:
         with open(cdir / f"{name}.csv", "w", newline="") as f:
             w = csv.writer(f); w.writerow(["group", "value"])
             for grp, arr in [("human", H[key]), ("bioreactor", B[key])]:
@@ -201,11 +205,10 @@ README = (
     "  Figure2.pptx         editable slide: 300-dpi figure + editable caption text box\n"
     "  Figure2_preview.png  raster preview\n"
     "  csv/                 one file per panel with the plotted data\n\n"
-    "Panels: a human cortex mean pulse ±SD; b bioreactor mean pulse ±SD (side by side,\n"
-    "shared scale); c the two mean pulses superimposed; d frequency spectrum;\n"
-    "e pulsatility magnitude; f time above trough+1SD; g time below trough+1SD;\n"
-    "h inter-beat interval. Cycles are per-cycle amplitude-normalized and rate-\n"
-    "standardized; panels a-c show the mean cycle tiled for display.\n"
+    "Panels: a human cortex mean pulse ±SD; b bioreactor mean pulse ±SD (stacked,\n"
+    "shared scale, 5 beats); c the two mean pulses superimposed; d frequency spectrum;\n"
+    "e pulsatility magnitude; f inter-beat interval. Cycles are per-cycle amplitude-\n"
+    "normalized and rate-standardized; panels a-c show the mean cycle tiled for display.\n"
 )
 
 
@@ -254,9 +257,9 @@ def main():
     caption = (f"Figure 2 | Parenchymal pulsatility, human cortex vs bioreactor. Human = patients "
                f"1, 2 and 4 pooled with equal per-patient weight ({H['n_cyc']} beats across 3 patients, "
                f"{H['rate']:.0f} bpm median); bioreactor = {B['n_org']} organoids across 3 replicates "
-               f"({B['n_cyc']} beats, {bbpm:.0f} bpm). a,b, Human and bioreactor mean cardiac pulse ± SD "
-               f"(rate-standardized, shared scale). c, The two mean pulses superimposed. d, Frequency spectrum. "
-               f"e, Pulsatility magnitude. f,g, Time above/below trough+1SD. h, Inter-beat interval.")
+               f"({B['n_cyc']} beats, {bbpm:.0f} bpm). a,b, Human and bioreactor mean cardiac pulse ± SD, "
+               f"stacked (rate-standardized, 5 beats, shared scale). c, The two mean pulses superimposed. "
+               f"d, Frequency spectrum. e, Pulsatility magnitude. f, Inter-beat interval.")
     ok = make_pptx(bdir / "Figure2_hires.png", bdir / "Figure2.pptx", caption)
     (bdir / "Figure2_hires.png").unlink()                    # embed-only; keep the bundle tidy
 
