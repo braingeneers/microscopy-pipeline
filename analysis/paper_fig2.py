@@ -154,7 +154,15 @@ def build(HV, BV, HD, BD, H, B, out):
         sh = int(0.30 * PER) - int(np.argmax(P["cyc_mean"]))
         return _tile(np.roll(P["cyc_mean"], sh), np.roll(P["cyc_sd"], sh), NPw)
     hv_, bv_ = _train(HV), _train(BV)                  # signed-velocity trains (x, mean, sd)
-    hd_, bd_ = _train(HD), _train(BD)                  # displacement trains
+    # displacement: put the human peak at ~0.3, then align the bioreactor to it by
+    # circular cross-correlation so the two curves line up peak-to-peak (comparability)
+    tgt = int(0.30 * PER)
+    sh_h = tgt - int(np.argmax(HD["cyc_mean"]))
+    ref = np.roll(HD["cyc_mean"], sh_h); ref = ref - ref.mean()
+    bx = BD["cyc_mean"] - BD["cyc_mean"].mean()
+    sh_b = int(np.argmax([np.dot(np.roll(bx, k), ref) for k in range(PER)]))
+    hd_ = _tile(np.roll(HD["cyc_mean"], sh_h), np.roll(HD["cyc_sd"], sh_h), NPw)
+    bd_ = _tile(np.roll(BD["cyc_mean"], sh_b), np.roll(BD["cyc_sd"], sh_b), NPw)
 
     def _lims(*tr):
         return (min((m - s).min() for _, m, s in tr) * 1.12,
