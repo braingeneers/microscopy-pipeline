@@ -20,11 +20,34 @@ from pulsatility import (
     analyze_pulsatility,
     analyze_pulsatility_video,
     build_roi_masks,
+    decompose_respiration,
+    highpass,
+    regress_out_reference,
+    load_video_gray,
     motion_signal,
     motion_signals,
+    plot_breathing_decomposition,
     plot_pulsatility,
+    plot_pulsatility_comparison,
+    stabilize_frames,
 )
 from pulsatility.pulsatility import parse_roi_spec
+
+
+def _write_synthetic_mp4(path, frames, fps):
+    """Write frames to an mp4; return True on success, False if no encoder."""
+    import cv2
+
+    h, w = frames[0].shape
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"),
+                             fps, (w, h), isColor=True)
+    if not writer.isOpened():
+        return False
+    for fr in frames:
+        writer.write(cv2.cvtColor(np.clip(fr, 0, 255).astype(np.uint8),
+                                  cv2.COLOR_GRAY2BGR))
+    writer.release()
+    return path.exists() and path.stat().st_size > 0
 
 
 def _pulsing_texture_frames(fps=30.0, dur=6.0, f=1.0, seed=0):
@@ -216,3 +239,145 @@ def test_end_to_end_with_rois_writes_roi_artifacts(tmp_path):
     for name in ("pulsatility_rois.png", "pulsatility_roi_waveforms.csv",
                  "pulsatility_roi_summary.txt", "pulsatility_analysis.png"):
         assert (out / name).exists(), name
+
+
+def test_frame_stride_grab_path(tmp_path):
+    """load_video_gray with frame_stride skips-decodes and scales fps down."""
+    frames, fps = _pulsing_texture_frames(f=1.0, dur=4.0)  # 120 frames @30fps
+    video = tmp_path / "stride.mp4"
+    if not _write_synthetic_mp4(video, frames, fps):
+        pytest.skip("no MP4 encoder available")
+    got, got_fps = load_video_gray(video, resize_width=0, frame_stride=3)
+    assert abs(got_fps - fps / 3) < 1e-6
+    assert abs(len(got) - len(frames) / 3) <= 2
+
+
+def test_plot_comparison(tmp_path):
+    """plot_pulsatility_comparison renders across two videos without raising."""
+    fa, fps = _pulsing_texture_frames(f=1.0, dur=4.0)
+    fb, _ = _pulsing_texture_frames(f=1.5, dur=4.0, seed=3)
+    ra = analyze_pulsatility(fa, fps, precomputed=motion_signal(fa, method="diff"))
+    rb = analyze_pulsatility(fb, fps, precomputed=motion_signal(fb, method="diff"))
+    out = tmp_path / "cmp.png"
+    plot_pulsatility_comparison({"A": ra, "B": rb}, out, title="A vs B")
+    assert out.exists() and out.stat().st_size > 0
+
+
+# --------------------------------------------------------------------------- #
+# Stabilization
+# --------------------------------------------------------------------------- #
+def test_stabilize_reduces_global_shake():
+    """stabilize_frames removes injected global jitter (frame-to-frame motion drops)."""
+    rng = np.random.default_rng(5)
+    tex = gaussian_filter(rng.standard_normal((80, 100)).astype(np.float32), 1.5)
+    tex = (tex - tex.min()) / np.ptp(tex) * 200 + 20
+    shifts = [(1.6 * np.sin(i * 0.5), 1.3 * np.cos(i * 0.4)) for i in range(30)]
+    frames = [ndshift(tex, (dy, dx), order=1, mode="reflect") for dx, dy in shifts]
+
+    def mafd(fr):
+        return float(np.mean([np.abs(fr[i + 1] - fr[i]).mean() for i in range(len(fr) - 1)]))
+
+    before = mafd(frames)
+    stab = stabilize_frames(frames, mode="euclidean", reference="mid")
+    after = mafd(stab)
+    assert len(stab) == len(frames)
+    assert stab[0].shape == frames[0].shape
+    assert after < 0.5 * before  # most of the shake removed
+
+
+def test_build_six_rois_now_allowed():
+    """MAX_ROIS was raised past 5; six ROIs build fine."""
+    assert MAX_ROIS >= 6
+    specs = [f"r{i}=0.{i}0,0.10,0.08,0.08" for i in range(6)]
+    regions = build_roi_masks((200, 200), rois=specs, units="fraction")
+    assert len(regions) == 6
+
+
+# --------------------------------------------------------------------------- #
+# Respiration / cardiac decomposition
+# --------------------------------------------------------------------------- #
+def test_decompose_recovers_breathing_and_cardiac():
+    from scipy.signal import hilbert
+
+    fps = 25.0
+    n = int(fps * 40)
+    t = np.arange(n) / fps
+    fc, fr = 1.2, 0.2  # 72 ppm cardiac, 12 /min breathing
+    rng = np.random.default_rng(7)
+    resp = 0.3 * np.sin(2 * np.pi * fr * t)
+    am = 1.0 + 0.5 * np.sin(2 * np.pi * fr * t)   # breathing modulates pulse amplitude
+    cardiac = am * np.sin(2 * np.pi * fc * t)
+    sig = 1.0 + resp + cardiac + 0.02 * rng.standard_normal(n)
+
+    res = decompose_respiration(sig, fps, resp_bpm=(6, 30), cardiac_bpm=(40, 140))
+    assert abs(res.cardiac_bpm - 72) < 6
+    assert abs(res.resp_bpm - 12) < 4
+    assert res.modulation_index > 0.1
+    # deconvolution flattens the respiratory amplitude modulation
+    cv_before = np.std(np.abs(hilbert(res.cardiac_wave))) / np.mean(np.abs(hilbert(res.cardiac_wave)))
+    cv_after = np.std(np.abs(hilbert(res.cardiac_deconv))) / np.mean(np.abs(hilbert(res.cardiac_deconv)))
+    assert cv_after < cv_before
+
+
+def test_plot_breathing_decomposition(tmp_path):
+    fps = 25.0
+    n = int(fps * 30)
+    t = np.arange(n) / fps
+    am = 1.0 + 0.4 * np.sin(2 * np.pi * 0.2 * t)
+    sig = 1.0 + 0.3 * np.sin(2 * np.pi * 0.2 * t) + am * np.sin(2 * np.pi * 1.2 * t)
+    res = decompose_respiration(sig, fps)
+    out = tmp_path / "breathing.png"
+    plot_breathing_decomposition(res, out, title="synthetic")
+    assert out.exists() and out.stat().st_size > 0
+
+
+def test_highpass_removes_slow_keeps_fast():
+    """A slow drift + fast pulse: high-pass must kill the slow part, keep the fast."""
+    fps = 25.0
+    n = int(fps * 60)
+    t = np.arange(n) / fps
+    slow = 1.0 * np.sin(2 * np.pi * (3 / 60) * t)   # 3 bpm slow oscillation
+    fast = 0.2 * np.sin(2 * np.pi * (90 / 60) * t)  # 90 bpm pulse
+    out = highpass(slow + fast, fps, cutoff_bpm=12.0)
+    # slow component nearly gone, fast component preserved (amp ~0.2, std ~0.141)
+    assert np.std(out) < 0.5 * np.std(slow + fast)
+    assert abs(np.std(out) - np.std(fast)) < 0.05
+    # correlation with the pure fast signal is high
+    assert np.corrcoef(out, fast)[0, 1] > 0.9
+
+
+def test_regress_out_reference_removes_shared_component():
+    fps = 25.0
+    n = int(fps * 40)
+    t = np.arange(n) / fps
+    ref = np.sin(2 * np.pi * 0.1 * t)               # shared nuisance
+    unique = 0.3 * np.sin(2 * np.pi * 1.3 * t)      # signal of interest
+    sig = 0.8 * ref + unique + 2.0                  # 0.8x the reference + offset
+    resid, beta = regress_out_reference(sig, ref)
+    assert abs(beta - 0.8) < 0.05
+    # the shared component is gone: residual correlates with `unique`, not `ref`
+    assert abs(np.corrcoef(resid, ref)[0, 1]) < 0.1
+    assert np.corrcoef(resid, unique)[0, 1] > 0.95
+
+
+def test_regress_out_reference_constant_ref_is_noop():
+    sig = np.array([1.0, 2.0, 3.0, 4.0])
+    resid, beta = regress_out_reference(sig, np.ones_like(sig))
+    assert beta == 0.0
+    assert np.allclose(resid, sig)
+
+
+def test_analyze_pulsatility_reference_signal_suppresses_shared_drift():
+    """Passing reference_signal should regress a shared nuisance out of the raw."""
+    fps = 25.0
+    n = int(fps * 40)
+    t = np.arange(n) / fps
+    drift = 0.5 * np.sin(2 * np.pi * 0.08 * t)
+    pulse = 0.15 * np.sin(2 * np.pi * 1.5 * t) + 1.0
+    raw = pulse + drift
+    amap = np.zeros((4, 4), dtype=float)
+    ref = np.zeros((4, 4), dtype=float)
+    res = analyze_pulsatility([], fps, precomputed=(raw, amap, ref),
+                              reference_signal=drift, min_bpm=40, max_bpm=200)
+    # cardiac rate still recovered (~90 bpm) and the drift is largely removed from raw
+    assert abs(res.bpm_spectral - 90) < 8
