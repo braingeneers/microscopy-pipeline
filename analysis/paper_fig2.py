@@ -272,9 +272,9 @@ README = (
     "Layout: LEFT column = signed velocity (~ fluid FLOW), RIGHT column = displacement\n"
     "(its integral, ~ PRESSURE). a,b human; c,d bioreactor; e,f overlays; g frequency\n"
     "spectrum; h pulsatility magnitude; i inter-beat interval. Waveforms are per-cycle\n"
-    "amplitude-normalized, rate-standardized, tiled (5 beats). Both waveform columns pool\n"
-    "the clean signed recordings (human 1/2 + organoids); the g/h/i rate-rhythm panels\n"
-    "additionally include surgical patient 4.\n"
+    "amplitude-normalized, rate-standardized, tiled (5 beats); the two displacement curves\n"
+    "are aligned peak-to-peak. Human = patients 1, 2 and 4 (per-patient equal); patient 4's\n"
+    "signed projection comes from run_human_surgical_signed.py.\n"
 )
 
 
@@ -306,12 +306,18 @@ def make_pptx(png_hi, outpath, caption):
 
 def _signed_pools(h1, h2, bf):
     """Signed velocity (~ flow) and its integral displacement (~ pressure) from the
-    signed-projection pkls. Humans: patients 1 & 2 (clean 4K recordings, per-patient
-    equal); the surgical patient 4 is not here -- directional projection is unreliable
-    with hands moving through the field. Bioreactor: per organoid."""
+    signed-projection pkls, per-patient equal. Humans: patients 1 & 2 (clean 4K) plus
+    the surgical patient 4 when signed_human4.pkl exists (its hand-free clean runs
+    pooled into one patient; agrees with the clean humans at R^2~0.83). Bioreactor:
+    per organoid."""
     hu = []
     for key, full in [("human1", h1), ("human2", h2)]:
         s = load(f"signed_{key}"); hu.append(_signed_cycles(s["signed"]["cortex"], s["fps"], full["cortex"].dominant_hz))
+    if (OUT / "signed_human4.pkl").exists():                      # surgical patient 4 = one patient
+        c4 = [_signed_cycles(r["signed"], r["fps"], r["f0"]) for r in load("signed_human4")["runs"]]
+        c4 = [c for c in c4 if len(c)]
+        if c4:
+            hu.append(np.vstack(c4))
     bu = []
     for i in (1, 2, 3):
         s = load(f"signed_bio{i}"); f0 = bf[i]["results"]["within-vessel"].dominant_hz; hz = s["signed"]["housing"]
@@ -343,12 +349,12 @@ def main():
     caption = (f"Figure 2 | Parenchymal pulsatility, human cortex vs bioreactor. Left column, signed tissue "
                f"velocity (optical flow projected on the principal motion axis; correlates with net fluid "
                f"FLOW); right column, its time-integral, displacement (correlates with parenchymal PRESSURE). "
-               f"Both pool the clean signed recordings -- human patients 1 & 2 (per-patient equal) and "
-               f"{B['n_org']} organoids ({BD['n']} units). a-d, Human and bioreactor mean pulse ± SD "
-               f"(rate-standardized, 5 beats). e,f, Overlays. g, Frequency spectrum (rate); "
-               f"h, pulsatility magnitude (px/frame); i, inter-beat interval -- these pool human patients "
-               f"1, 2 and 4 ({H['n_cyc']} beats, {H['rate']:.0f} bpm) and the organoids ({B['n_cyc']} beats, "
-               f"{bbpm:.0f} bpm). Surgical patient 4 is rate/rhythm only (no reliable directional projection).")
+               f"Human = patients 1, 2 and 4 pooled per-patient equal ({HV['n']} patients; the surgical "
+               f"patient 4's hand-free clean runs agree with the clean recordings at R^2~0.83); bioreactor = "
+               f"{B['n_org']} organoids. a-d, Human and bioreactor mean pulse ± SD (rate-standardized, "
+               f"5 beats); displacement curves aligned peak-to-peak. e,f, Overlays. g, Frequency spectrum; "
+               f"h, pulsatility magnitude (px/frame); i, inter-beat interval ({H['n_cyc']} human beats, "
+               f"{H['rate']:.0f} bpm; {B['n_cyc']} organoid beats, {bbpm:.0f} bpm).")
     ok = make_pptx(bdir / "Figure2_hires.png", bdir / "Figure2.pptx", caption)
     (bdir / "Figure2_hires.png").unlink()                    # embed-only; keep the bundle tidy
 

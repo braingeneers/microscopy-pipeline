@@ -17,6 +17,7 @@ the scripts at your own copies.
 | `run_human.py` | analyse one clean (4K) human cortex video (pulsatility + respiration) → `<label>_full.pkl` |
 | `run_human_surgical.py` | recover cardiac pulse from a hands-in-frame **surgical** human clip by rejecting hand/instrument transients and keeping contiguous clean runs → `<key>_surgical.pkl` |
 | `run_signed_projection.py` | signed-projection (PCA) motion → `signed_<key>.pkl` for the displacement/pressure space |
+| `run_human_surgical_signed.py` | signed-projection velocity for a surgical human's hand-free clean runs → `signed_<key>.pkl` (lets patient 4 enter the velocity/displacement panels) |
 | `build_comparisons.py` | build the three comparison figures from the pickles |
 | `build_gold_standard.py` | human-as-gold-standard figures (speed + signed/displacement); optionally folds a surgical human in as a third, weight-controlled real human |
 | `pool_surgical_human.py` | single-run vs pooled ensemble pulse for a surgical human (why pooling short clean runs sharpens the mean) → `<key>_pooled.png` |
