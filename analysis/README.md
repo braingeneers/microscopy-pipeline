@@ -20,6 +20,7 @@ the scripts at your own copies.
 | `build_comparisons.py` | build the three comparison figures from the pickles |
 | `build_gold_standard.py` | human-as-gold-standard figures (speed + signed/displacement); optionally folds a surgical human in as a third, weight-controlled real human |
 | `pool_surgical_human.py` | single-run vs pooled ensemble pulse for a surgical human (why pooling short clean runs sharpens the mean) → `<key>_pooled.png` |
+| `paper_fig2.py` | Nature-style Figure 2 (human reps 1/2/4 pooled equally vs bioreactor) → `Figure2_bundle.zip` (PDF, SVG, editable PPTX, PNG preview, per-panel CSVs). The `.pptx` step needs `python-pptx`. |
 | `analyze_slow_oscillation.py` | ROI origin test: is a slow oscillation physiological or global field drift? |
 
 ## Paths
