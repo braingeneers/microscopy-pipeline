@@ -6,13 +6,13 @@ Bioreactor side pools all organoids across the 3 replicates.
 
 Emits a self-contained bundle: small PNG preview, vector PDF, editable PPTX
 (300-dpi figure + editable caption; python-pptx), and one CSV of the underlying data
-per panel, all zipped. Two columns of rhythm strips -- LEFT tissue speed, RIGHT
-displacement (integral of signed velocity ~ parenchymal pressure) -- then an
-analysis row:
-    a/b human speed/displacement    c/d bioreactor speed/displacement
-    e/f speed/displacement overlay  g frequency spectrum  h magnitude  i inter-beat
-Displacement uses the signed-projection pkls (patients 1/2 + organoids); the surgical
-patient 4 is speed-only (directional projection is unreliable with hands in frame).
+per panel, all zipped. Two columns of rhythm strips -- LEFT signed velocity
+(~ fluid flow), RIGHT displacement (its time-integral ~ parenchymal pressure) --
+then an analysis row:
+    a/b human velocity/displacement    c/d bioreactor velocity/displacement
+    e/f velocity/displacement overlay  g frequency spectrum  h magnitude  i inter-beat
+Both waveform columns use the signed-projection pkls (patients 1/2 + organoids); the
+surgical patient 4 (no reliable directional projection) enters only g/h/i.
 
 Usage:  python paper_fig2.py            # reads $PULS_WORK/out, writes .../out/fig2_bundle
 """
@@ -81,15 +81,26 @@ def _tile(mean, sd, n):
     return x, np.tile(mean, n), np.tile(sd, n)
 
 
-# ---- displacement (integral of SIGNED velocity ~ parenchymal pressure) -------
-def _disp_cycles(signed_v, fps, f0):
+# ---- signed velocity (~ flow) and its integral, displacement (~ pressure) ----
+def _signed_cycles(signed_v, fps, f0):
+    """Per-cycle SIGNED velocity (~ fluid flow): band-limited, oriented so the
+    systolic excursion is positive, then cut into amplitude-normalized cycles."""
     from scipy.stats import skew
-    x = np.cumsum(signed_v - np.mean(signed_v))        # velocity -> displacement
-    x = highpass(x, fps, 12.0)                          # strip integration drift
-    x = _bandlimit(x, fps, f0)                          # cardiac band
-    x = x if skew(x) >= 0 else -x                       # orient systolic deflection positive
+    x = _bandlimit(signed_v, fps, f0)
+    x = x if skew(x) >= 0 else -x
     C = _cycles(x, fps, f0, PER)
     return C / (np.percentile(np.abs(C), 99) or 1) if len(C) else np.zeros((0, PER))
+
+
+def _integrate_cycles(Vc):
+    """Displacement (~ pressure) = time-integral of each velocity cycle. Integration
+    is intrinsically low-pass, so this gives the smooth pressure-like pulse (no post
+    high-pass/band-pass, unlike the earlier per-cycle-filtered version)."""
+    if not len(Vc):
+        return Vc
+    D = np.cumsum(Vc - Vc.mean(1, keepdims=True), axis=1)
+    s = np.percentile(np.abs(D), 99, axis=1, keepdims=True); s[s == 0] = 1
+    return D / s
 
 
 def _pool_disp(units):
@@ -135,29 +146,30 @@ def _smooth(y, k=5):
     return np.convolve(np.pad(y, k // 2, mode="edge"), np.ones(k) / k, "valid")[:len(y)]
 
 
-def build(H, B, HD, BD, out):
+def build(HV, BV, HD, BD, H, B, out):
     _style()
     NPw = 5                                            # beats shown per waveform strip
 
     def _train(P):                                     # roll peak ~1/3 into beat, tile
         sh = int(0.30 * PER) - int(np.argmax(P["cyc_mean"]))
         return _tile(np.roll(P["cyc_mean"], sh), np.roll(P["cyc_sd"], sh), NPw)
-    hs_, bs_ = _train(H), _train(B)                    # speed trains (x, mean, sd)
+    hv_, bv_ = _train(HV), _train(BV)                  # signed-velocity trains (x, mean, sd)
     hd_, bd_ = _train(HD), _train(BD)                  # displacement trains
 
     def _lims(*tr):
         return (min((m - s).min() for _, m, s in tr) * 1.12,
                 max((m + s).max() for _, m, s in tr) * 1.12)
-    slo, shi = _lims(hs_, bs_); dlo, dhi = _lims(hd_, bd_)
+    vlo, vhi = _lims(hv_, bv_); dlo, dhi = _lims(hd_, bd_)
+    vyt = [t for t in (-1.0, 0.0, 1.0) if vlo - 0.05 <= t <= vhi + 0.05] or [0.0, 1.0]
+    dyt = [t for t in (-1.0, 0.0, 1.0) if dlo - 0.05 <= t <= dhi + 0.05] or [0.0, 1.0]
 
     fig = plt.figure(figsize=(8.4, 6.7))
     outer = GridSpec(2, 1, figure=fig, height_ratios=[1.7, 0.82], hspace=0.5,
                      top=0.94, bottom=0.07, left=0.085, right=0.98)
     gt = outer[0].subgridspec(3, 2, hspace=0.2, wspace=0.28)
     gb = outer[1].subgridspec(1, 3, wspace=0.52)
-    yt = [0.0, 0.5, 1.0]
 
-    def _strip(ax, tr, color, ylo, yhi, ylabel=None, last=False):
+    def _strip(ax, tr, color, ylo, yhi, yt, ylabel=None):
         x, m, s = tr
         ax.fill_between(x, m - s, m + s, color=color, alpha=0.18, lw=0)
         ax.plot(x, m, color=color, lw=1.5)
@@ -165,9 +177,9 @@ def build(H, B, HD, BD, out):
         ax.set_xlim(0, NPw); ax.set_xticks(range(NPw + 1)); ax.set_ylim(ylo, yhi); ax.set_yticks(yt)
         if ylabel:
             ax.set_ylabel(ylabel, fontsize=8.5)
-        ax.set_xlabel("Cardiac cycles (rate-standardized)") if last else ax.set_xticklabels([])
+        ax.set_xticklabels([])
 
-    def _ov(ax, trh, trb, ylo, yhi, ylabel=None, legend=False):
+    def _ov(ax, trh, trb, ylo, yhi, yt, ylabel=None, legend=False):
         ax.plot(trh[0], trh[1], color=BLUE, lw=1.4, label="Human")
         ax.plot(trb[0], trb[1], color=RED, lw=1.4, label="Bioreactor")
         ax.axhline(0, color="0.65", lw=0.5, zorder=0)
@@ -178,13 +190,13 @@ def build(H, B, HD, BD, out):
         if legend:
             ax.legend(loc="upper right", frameon=False, ncol=2, handlelength=1.2, fontsize=7, columnspacing=1.0)
 
-    # left column = tissue speed; right column = displacement (~ pressure)
-    axa = fig.add_subplot(gt[0, 0]); _strip(axa, hs_, BLUE, slo, shi, "Human\n(norm.)"); axa.set_title("Tissue speed"); _panel(axa, "a")
-    axb = fig.add_subplot(gt[0, 1]); _strip(axb, hd_, BLUE, dlo, dhi); axb.set_title("Displacement (~ pressure)"); _panel(axb, "b")
-    axc = fig.add_subplot(gt[1, 0]); _strip(axc, bs_, RED, slo, shi, "Bioreactor\n(norm.)"); _panel(axc, "c")
-    axd = fig.add_subplot(gt[1, 1]); _strip(axd, bd_, RED, dlo, dhi); _panel(axd, "d")
-    axe = fig.add_subplot(gt[2, 0]); _ov(axe, hs_, bs_, slo, shi, "Overlay\n(norm.)", legend=True); _panel(axe, "e")
-    axf = fig.add_subplot(gt[2, 1]); _ov(axf, hd_, bd_, dlo, dhi); _panel(axf, "f")
+    # left column = signed velocity (~ fluid flow); right column = displacement (~ pressure)
+    axa = fig.add_subplot(gt[0, 0]); _strip(axa, hv_, BLUE, vlo, vhi, vyt, "Human\n(norm.)"); axa.set_title("Signed velocity  (~ fluid flow)"); _panel(axa, "a")
+    axb = fig.add_subplot(gt[0, 1]); _strip(axb, hd_, BLUE, dlo, dhi, dyt); axb.set_title("Displacement  (~ pressure)"); _panel(axb, "b")
+    axc = fig.add_subplot(gt[1, 0]); _strip(axc, bv_, RED, vlo, vhi, vyt, "Bioreactor\n(norm.)"); _panel(axc, "c")
+    axd = fig.add_subplot(gt[1, 1]); _strip(axd, bd_, RED, dlo, dhi, dyt); _panel(axd, "d")
+    axe = fig.add_subplot(gt[2, 0]); _ov(axe, hv_, bv_, vlo, vhi, vyt, "Overlay\n(norm.)", legend=True); _panel(axe, "e")
+    axf = fig.add_subplot(gt[2, 1]); _ov(axf, hd_, bd_, dlo, dhi, dyt); _panel(axf, "f")
 
     # analysis row: g frequency spectrum (speed), h pulsatility magnitude, i inter-beat interval
     axg = fig.add_subplot(gb[0])
@@ -214,9 +226,9 @@ def _wave_csv(path, P, Q):
                         f"{Q['cyc_mean'][i]:.6f}", f"{Q['cyc_sd'][i]:.6f}"])
 
 
-def _write_csvs(H, B, HD, BD, cdir):
+def _write_csvs(HV, BV, HD, BD, H, B, cdir):
     cdir.mkdir(parents=True, exist_ok=True)
-    _wave_csv(cdir / "speed_mean_waveforms.csv", H, B)
+    _wave_csv(cdir / "signed_velocity_mean_waveforms.csv", HV, BV)
     _wave_csv(cdir / "displacement_mean_waveforms.csv", HD, BD)
     with open(cdir / "frequency_spectrum.csv", "w", newline="") as f:
         w = csv.writer(f); w.writerow(["rate_bpm", "human_power_norm", "bioreactor_power_norm"])
@@ -249,11 +261,12 @@ README = (
     "  Figure2.pptx         editable slide: 300-dpi figure + editable caption text box\n"
     "  Figure2_preview.png  raster preview\n"
     "  csv/                 one file per panel with the plotted data\n\n"
-    "Layout: LEFT column = tissue speed, RIGHT column = displacement (~ pressure).\n"
-    "a,b human (speed, displacement); c,d bioreactor; e,f overlays; g frequency spectrum;\n"
-    "h pulsatility magnitude; i inter-beat interval. Waveforms are per-cycle amplitude-\n"
-    "normalized, rate-standardized, and shown tiled (5 beats). Speed pools human patients\n"
-    "1/2/4; displacement pools the clean recordings 1/2 only (see above).\n"
+    "Layout: LEFT column = signed velocity (~ fluid FLOW), RIGHT column = displacement\n"
+    "(its integral, ~ PRESSURE). a,b human; c,d bioreactor; e,f overlays; g frequency\n"
+    "spectrum; h pulsatility magnitude; i inter-beat interval. Waveforms are per-cycle\n"
+    "amplitude-normalized, rate-standardized, tiled (5 beats). Both waveform columns pool\n"
+    "the clean signed recordings (human 1/2 + organoids); the g/h/i rate-rhythm panels\n"
+    "additionally include surgical patient 4.\n"
 )
 
 
@@ -283,20 +296,23 @@ def make_pptx(png_hi, outpath, caption):
     return Path(outpath).exists()
 
 
-def _displacement_pools(h1, h2, bf):
-    """Displacement (integral of SIGNED velocity ~ pressure) from signed_*.pkl.
-    Humans: patients 1 & 2 (clean 4K recordings, per-patient equal). The surgical
-    patient 4 is speed-only -- directional projection is unreliable with hands moving
-    through the field -- so it is not in the displacement pool. Bioreactor: per organoid."""
+def _signed_pools(h1, h2, bf):
+    """Signed velocity (~ flow) and its integral displacement (~ pressure) from the
+    signed-projection pkls. Humans: patients 1 & 2 (clean 4K recordings, per-patient
+    equal); the surgical patient 4 is not here -- directional projection is unreliable
+    with hands moving through the field. Bioreactor: per organoid."""
     hu = []
     for key, full in [("human1", h1), ("human2", h2)]:
-        s = load(f"signed_{key}"); hu.append(_disp_cycles(s["signed"]["cortex"], s["fps"], full["cortex"].dominant_hz))
+        s = load(f"signed_{key}"); hu.append(_signed_cycles(s["signed"]["cortex"], s["fps"], full["cortex"].dominant_hz))
     bu = []
     for i in (1, 2, 3):
         s = load(f"signed_bio{i}"); f0 = bf[i]["results"]["within-vessel"].dominant_hz; hz = s["signed"]["housing"]
         for on in [n for n in s["names"] if len(n) == 2 and n[0] == "o" and n[1].isdigit()]:
-            bu.append(_disp_cycles(figures._regress_out(s["signed"][on], hz)[0], s["fps"], f0))
-    return _pool_disp(hu), _pool_disp(bu)
+            bu.append(_signed_cycles(figures._regress_out(s["signed"][on], hz)[0], s["fps"], f0))
+    HV, BV = _pool_disp(hu), _pool_disp(bu)                              # signed velocity
+    HD = _pool_disp([_integrate_cycles(c) for c in hu])                 # displacement
+    BD = _pool_disp([_integrate_cycles(c) for c in bu])
+    return HV, BV, HD, BD
 
 
 def main():
@@ -306,24 +322,25 @@ def main():
     B = _pool_bioreactor([dict(results=bf[i]["results"], fps=bf[i]["fps"]) for i in (1, 2, 3)], per=PER)
     H = _pool_humans([dict(cortex=h1["cortex"], resp=h1["resp"], fps=h1["fps"]),
                       dict(cortex=h2["cortex"], resp=h2["resp"], fps=h2["fps"])], srec["runs"])
-    HD, BD = _displacement_pools(h1, h2, bf)
+    HV, BV, HD, BD = _signed_pools(h1, h2, bf)
 
     bdir = OUT / "fig2_bundle";
     if bdir.exists(): shutil.rmtree(bdir)
     bdir.mkdir(parents=True)
     stem = bdir / "Figure2"
-    build(H, B, HD, BD, stem)
-    _write_csvs(H, B, HD, BD, bdir / "csv")
+    build(HV, BV, HD, BD, H, B, stem)
+    _write_csvs(HV, BV, HD, BD, H, B, bdir / "csv")
     (bdir / "README.txt").write_text(README)
     bbpm = float(np.median(B["rep_bpm"]))
-    caption = (f"Figure 2 | Parenchymal pulsatility, human cortex vs bioreactor. Left column, rectified "
-               f"tissue speed (mean optical-flow magnitude, px/frame; ~ |d/dt displacement|); right column, "
-               f"displacement (time-integral of signed velocity ~ parenchymal pressure). Speed pools human "
-               f"patients 1, 2 and 4 (equal per patient, {H['n_cyc']} beats, {H['rate']:.0f} bpm) and "
-               f"{B['n_org']} organoids ({B['n_cyc']} beats, {bbpm:.0f} bpm); displacement pools the two clean "
-               f"human recordings (1, 2; patient 4 is speed-only) and the organoids. a-d, Human and bioreactor "
-               f"mean pulse ± SD (rate-standardized, 5 beats). e,f, Overlays. g, Frequency spectrum. "
-               f"h, Pulsatility magnitude (px/frame). i, Inter-beat interval.")
+    caption = (f"Figure 2 | Parenchymal pulsatility, human cortex vs bioreactor. Left column, signed tissue "
+               f"velocity (optical flow projected on the principal motion axis; correlates with net fluid "
+               f"FLOW); right column, its time-integral, displacement (correlates with parenchymal PRESSURE). "
+               f"Both pool the clean signed recordings -- human patients 1 & 2 (per-patient equal) and "
+               f"{B['n_org']} organoids ({BD['n']} units). a-d, Human and bioreactor mean pulse ± SD "
+               f"(rate-standardized, 5 beats). e,f, Overlays. g, Frequency spectrum (rate); "
+               f"h, pulsatility magnitude (px/frame); i, inter-beat interval -- these pool human patients "
+               f"1, 2 and 4 ({H['n_cyc']} beats, {H['rate']:.0f} bpm) and the organoids ({B['n_cyc']} beats, "
+               f"{bbpm:.0f} bpm). Surgical patient 4 is rate/rhythm only (no reliable directional projection).")
     ok = make_pptx(bdir / "Figure2_hires.png", bdir / "Figure2.pptx", caption)
     (bdir / "Figure2_hires.png").unlink()                    # embed-only; keep the bundle tidy
 
