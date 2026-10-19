@@ -400,8 +400,12 @@ def main(argv=None):
     p.add_argument("--panel-width", type=int, default=640)
     p.add_argument("--max-frames", type=int, default=500)
     p.add_argument("--fps", type=int, default=30)
-    p.add_argument("--contrast", type=float, default=1.0, help="S-curve contrast gain (1.0 = none)")
-    p.add_argument("--gamma", type=float, default=1.0, help="shadow gamma (>1 deepens shadows)")
+    p.add_argument("--contrast", type=float, default=1.0, help="S-curve contrast gain (1.0 = none); default for both panels")
+    p.add_argument("--gamma", type=float, default=1.0, help="shadow gamma (>1 deepens shadows); default for both panels")
+    p.add_argument("--left-contrast", type=float, default=None, help="override contrast for the left panel")
+    p.add_argument("--left-gamma", type=float, default=None)
+    p.add_argument("--right-contrast", type=float, default=None, help="override contrast for the right panel")
+    p.add_argument("--right-gamma", type=float, default=None)
     p.add_argument("--minimal", action="store_true", help="only the two panel labels, no other text")
     p.add_argument("--title", default="Parenchymal pulsatility  -  rate-matched side-by-side")
     p.add_argument("--left-color", default="1f6feb")
@@ -409,12 +413,16 @@ def main(argv=None):
     a = p.parse_args(argv)
     band = tuple(float(x) for x in a.rate_band.split(","))
 
+    lc = a.left_contrast if a.left_contrast is not None else a.contrast
+    lg = a.left_gamma if a.left_gamma is not None else a.gamma
+    rc = a.right_contrast if a.right_contrast is not None else a.contrast
+    rg = a.right_gamma if a.right_gamma is not None else a.gamma
     L = prepare_side(a.left, width=a.panel_width, max_frames=a.max_frames, stabilize=a.lstab,
                      crop=a.left_crop, magnify=a.left_magnify, band_bpm=band, cycles=a.cycles,
-                     mpc=a.mpc, contrast=a.contrast, gamma=a.gamma)
+                     mpc=a.mpc, contrast=lc, gamma=lg)
     R = prepare_side(a.right, width=a.panel_width, max_frames=a.max_frames, stabilize=a.rstab,
                      crop=a.right_crop, magnify=a.right_magnify, band_bpm=band, cycles=a.cycles,
-                     mpc=a.mpc, contrast=a.contrast, gamma=a.gamma)
+                     mpc=a.mpc, contrast=rc, gamma=rg)
     print(f"left {L['bpm']:.0f}bpm K={L['K']}; right {R['bpm']:.0f}bpm K={R['K']}")
     compose(L, R, a.out, labels=(a.left_label, a.right_label),
             colors=(_bgr(a.left_color), _bgr(a.right_color)),
