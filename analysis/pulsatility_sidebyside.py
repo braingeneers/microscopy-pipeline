@@ -175,6 +175,16 @@ def crop_frames(frames, box):
     return [f[b:d, a:c] for f in frames]
 
 
+def apply_look(frames, contrast=1.0, gamma=1.0):
+    """S-curve contrast around mid-grey + gamma (gamma>1 deepens shadows). LUT, fast."""
+    if contrast == 1.0 and gamma == 1.0:
+        return frames
+    x = np.arange(256) / 255.0
+    y = np.clip((x - 0.5) * contrast + 0.5, 0, 1) ** gamma
+    lut = np.clip(y * 255, 0, 255).astype(np.uint8)
+    return [cv2.LUT(f, lut) for f in frames]
+
+
 def eulerian_magnify(frames_bgr, fps, f0, alpha, blur=2.2):
     """Linear Eulerian motion magnification in a narrow band around f0."""
     arr = np.stack(frames_bgr, 0).astype(np.float32)
@@ -243,7 +253,7 @@ def resize_panels(frames, idxs, width):
 # per-side preparation
 # --------------------------------------------------------------------------- #
 def prepare_side(path, *, width, max_frames, stabilize, crop, magnify,
-                 band_bpm, cycles, mpc, roi=(0.30, 0.70, 0.30, 0.70)):
+                 band_bpm, cycles, mpc, contrast=1.0, gamma=1.0, roi=(0.30, 0.70, 0.30, 0.70)):
     frames, fps = load_video(path, width, max_frames)
     if stabilize:
         frames, gray = ecc_stabilize(frames)
@@ -262,6 +272,7 @@ def prepare_side(path, *, width, max_frames, stabilize, crop, magnify,
     frames = crop_frames(frames, crop)
     if magnify > 0:
         frames = eulerian_magnify(frames, fps, f0, magnify)
+    frames = apply_look(frames, contrast, gamma)
     return dict(panel=resize_panels(frames, idxs, width), wav=wav,
                 bpm=f0 * 60, K=K, M=mpc, fps=fps)
 
@@ -389,6 +400,8 @@ def main(argv=None):
     p.add_argument("--panel-width", type=int, default=640)
     p.add_argument("--max-frames", type=int, default=500)
     p.add_argument("--fps", type=int, default=30)
+    p.add_argument("--contrast", type=float, default=1.0, help="S-curve contrast gain (1.0 = none)")
+    p.add_argument("--gamma", type=float, default=1.0, help="shadow gamma (>1 deepens shadows)")
     p.add_argument("--minimal", action="store_true", help="only the two panel labels, no other text")
     p.add_argument("--title", default="Parenchymal pulsatility  -  rate-matched side-by-side")
     p.add_argument("--left-color", default="1f6feb")
@@ -397,9 +410,11 @@ def main(argv=None):
     band = tuple(float(x) for x in a.rate_band.split(","))
 
     L = prepare_side(a.left, width=a.panel_width, max_frames=a.max_frames, stabilize=a.lstab,
-                     crop=a.left_crop, magnify=a.left_magnify, band_bpm=band, cycles=a.cycles, mpc=a.mpc)
+                     crop=a.left_crop, magnify=a.left_magnify, band_bpm=band, cycles=a.cycles,
+                     mpc=a.mpc, contrast=a.contrast, gamma=a.gamma)
     R = prepare_side(a.right, width=a.panel_width, max_frames=a.max_frames, stabilize=a.rstab,
-                     crop=a.right_crop, magnify=a.right_magnify, band_bpm=band, cycles=a.cycles, mpc=a.mpc)
+                     crop=a.right_crop, magnify=a.right_magnify, band_bpm=band, cycles=a.cycles,
+                     mpc=a.mpc, contrast=a.contrast, gamma=a.gamma)
     print(f"left {L['bpm']:.0f}bpm K={L['K']}; right {R['bpm']:.0f}bpm K={R['K']}")
     compose(L, R, a.out, labels=(a.left_label, a.right_label),
             colors=(_bgr(a.left_color), _bgr(a.right_color)),
