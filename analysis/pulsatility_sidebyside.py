@@ -92,6 +92,14 @@ def displacement(sig: np.ndarray, fps: float, f0: float) -> np.ndarray:
     return bandpass(np.cumsum(sig - sig.mean()), fps, f0)
 
 
+def displacement_raw(sig: np.ndarray, fps: float, f0: float) -> np.ndarray:
+    """Displacement with drift removed only (high-pass) -- keeps the real detail,
+    no low-pass smoothing."""
+    nyq = fps / 2.0
+    b, a = butter(2, max(0.02, 0.5 * f0 / nyq), btype="high")
+    return filtfilt(b, a, np.cumsum(sig - sig.mean()))
+
+
 # --------------------------------------------------------------------------- #
 # video helpers
 # --------------------------------------------------------------------------- #
@@ -253,7 +261,8 @@ def resize_panels(frames, idxs, width):
 # per-side preparation
 # --------------------------------------------------------------------------- #
 def prepare_side(path, *, width, max_frames, stabilize, crop, magnify,
-                 band_bpm, cycles, mpc, contrast=1.0, gamma=1.0, roi=(0.30, 0.70, 0.30, 0.70)):
+                 band_bpm, cycles, mpc, contrast=1.0, gamma=1.0, raw_waveform=False,
+                 roi=(0.30, 0.70, 0.30, 0.70)):
     frames, fps = load_video(path, width, max_frames)
     if stabilize:
         frames, gray = ecc_stabilize(frames)
@@ -261,12 +270,13 @@ def prepare_side(path, *, width, max_frames, stabilize, crop, magnify,
         gray = [cv2.cvtColor(f, cv2.COLOR_BGR2GRAY).astype(np.float32) for f in frames]
     sig = signed_velocity(gray, roi)
     f0 = dominant_f0(sig, fps, band_bpm)
-    disp = displacement(sig, fps, f0)
+    disp = displacement(sig, fps, f0)            # smooth: robust cycle segmentation
     troughs = cycle_troughs(disp, fps, f0)
     if len(troughs) < 2:
         raise RuntimeError(f"{path}: could not segment cycles at {f0*60:.0f} bpm")
     start, K = pick_window(disp, troughs, cycles)
-    idxs, wav = build_montage(frames, disp, troughs, start, K, mpc)
+    wave = displacement_raw(sig, fps, f0) if raw_waveform else disp   # what gets drawn
+    idxs, wav = build_montage(frames, wave, troughs, start, K, mpc)
     if abs(wav.min()) > abs(wav.max()):   # orient systolic excursion upward
         wav = -wav
     frames = crop_frames(frames, crop)
@@ -406,6 +416,8 @@ def main(argv=None):
     p.add_argument("--left-gamma", type=float, default=None)
     p.add_argument("--right-contrast", type=float, default=None, help="override contrast for the right panel")
     p.add_argument("--right-gamma", type=float, default=None)
+    p.add_argument("--raw-waveform", action="store_true",
+                   help="draw the detrended (unsmoothed) displacement instead of the band-passed one")
     p.add_argument("--minimal", action="store_true", help="only the two panel labels, no other text")
     p.add_argument("--title", default="Parenchymal pulsatility  -  rate-matched side-by-side")
     p.add_argument("--left-color", default="1f6feb")
@@ -419,10 +431,10 @@ def main(argv=None):
     rg = a.right_gamma if a.right_gamma is not None else a.gamma
     L = prepare_side(a.left, width=a.panel_width, max_frames=a.max_frames, stabilize=a.lstab,
                      crop=a.left_crop, magnify=a.left_magnify, band_bpm=band, cycles=a.cycles,
-                     mpc=a.mpc, contrast=lc, gamma=lg)
+                     mpc=a.mpc, contrast=lc, gamma=lg, raw_waveform=a.raw_waveform)
     R = prepare_side(a.right, width=a.panel_width, max_frames=a.max_frames, stabilize=a.rstab,
                      crop=a.right_crop, magnify=a.right_magnify, band_bpm=band, cycles=a.cycles,
-                     mpc=a.mpc, contrast=rc, gamma=rg)
+                     mpc=a.mpc, contrast=rc, gamma=rg, raw_waveform=a.raw_waveform)
     print(f"left {L['bpm']:.0f}bpm K={L['K']}; right {R['bpm']:.0f}bpm K={R['K']}")
     compose(L, R, a.out, labels=(a.left_label, a.right_label),
             colors=(_bgr(a.left_color), _bgr(a.right_color)),
