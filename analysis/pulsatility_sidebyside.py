@@ -277,8 +277,6 @@ def prepare_side(path, *, width, max_frames, stabilize, crop, magnify,
     start, K = pick_window(disp, troughs, cycles)
     wave = displacement_raw(sig, fps, f0) if raw_waveform else disp   # what gets drawn
     idxs, wav = build_montage(frames, wave, troughs, start, K, mpc)
-    if abs(wav.min()) > abs(wav.max()):   # orient systolic excursion upward
-        wav = -wav
     frames = crop_frames(frames, crop)
     if magnify > 0:
         frames = eulerian_magnify(frames, fps, f0, magnify)
@@ -290,6 +288,41 @@ def prepare_side(path, *, width, max_frames, stabilize, crop, magnify,
 # --------------------------------------------------------------------------- #
 # compositing
 # --------------------------------------------------------------------------- #
+def _cycle_mean(wav, M):
+    n = (len(wav) // M) * M
+    return wav[:n].reshape(-1, M).mean(0)
+
+
+def orient_up(side):
+    """Flip a panel's waveform so its sharp (systolic) excursion points up."""
+    w = side["wav"]
+    if abs(w.min()) > abs(w.max()):
+        side["wav"] = -w
+
+
+def align_to(ref, side):
+    """Phase-align `side` to `ref` by cross-correlating their mean cycles over sign
+    and lag, then rolling the side's waveform AND its video frames together. This is
+    what makes the two pulses line up instead of each sitting at its own phase."""
+    M = ref["M"]
+    aL = _cycle_mean(ref["wav"], M)
+    aL = aL - aL.mean()
+    aR0 = _cycle_mean(side["wav"], M)
+    aR0 = aR0 - aR0.mean()
+    best = (-2.0, 1, 0)
+    for sign in (1, -1):
+        v = sign * aR0
+        for k in range(M):
+            c = float(np.corrcoef(aL, np.roll(v, k))[0, 1])
+            if c > best[0]:
+                best = (c, sign, k)
+    _, sign, k = best
+    side["wav"] = np.roll(sign * side["wav"], k)
+    if k:
+        side["panel"] = side["panel"][-k:] + side["panel"][:-k]
+    return best
+
+
 def _draw_strip(canvas, x0, y0, w, h, trace, t, color, label, M, minimal, bpm):
     cv2.rectangle(canvas, (x0, y0), (x0 + w, y0 + h), (248, 248, 248), -1)
     cv2.rectangle(canvas, (x0, y0), (x0 + w, y0 + h), (210, 210, 210), 1)
@@ -418,6 +451,8 @@ def main(argv=None):
     p.add_argument("--right-gamma", type=float, default=None)
     p.add_argument("--raw-waveform", action="store_true",
                    help="draw the detrended (unsmoothed) displacement instead of the band-passed one")
+    p.add_argument("--no-align", action="store_true",
+                   help="do not phase-align the right waveform to the left")
     p.add_argument("--minimal", action="store_true", help="only the two panel labels, no other text")
     p.add_argument("--title", default="Parenchymal pulsatility  -  rate-matched side-by-side")
     p.add_argument("--left-color", default="1f6feb")
@@ -435,6 +470,11 @@ def main(argv=None):
     R = prepare_side(a.right, width=a.panel_width, max_frames=a.max_frames, stabilize=a.rstab,
                      crop=a.right_crop, magnify=a.right_magnify, band_bpm=band, cycles=a.cycles,
                      mpc=a.mpc, contrast=rc, gamma=rg, raw_waveform=a.raw_waveform)
+    orient_up(L)
+    orient_up(R)
+    if not a.no_align:
+        corr, sign, lag = align_to(L, R)
+        print(f"waveform align: corr={corr:.2f} sign={sign:+d} lag={lag}/{R['M']}")
     print(f"left {L['bpm']:.0f}bpm K={L['K']}; right {R['bpm']:.0f}bpm K={R['K']}")
     compose(L, R, a.out, labels=(a.left_label, a.right_label),
             colors=(_bgr(a.left_color), _bgr(a.right_color)),
